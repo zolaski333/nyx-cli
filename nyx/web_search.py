@@ -7,10 +7,14 @@ interface for other search providers.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,8 +29,16 @@ class SearchResult:
 # ---------------------------------------------------------------------------
 
 
+def _clean_html(html_text: str) -> str:
+    """Remove HTML tags from a string."""
+    return re.sub(r"<[^>]+>", "", html_text).strip()
+
+
 def _ddg_search(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Search DuckDuckGo and parse results from HTML."""
+    """Search DuckDuckGo and parse results from HTML.
+
+    Uses multiple parsing strategies for robustness against markup changes.
+    """
     url = "https://html.duckduckgo.com/html/"
     data = urllib.parse.urlencode({"q": query}).encode()
     req = urllib.request.Request(url, data=data, method="POST")
@@ -40,22 +52,11 @@ def _ddg_search(query: str, max_results: int = 5) -> list[SearchResult]:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="replace")
-    except Exception:
+    except Exception as e:
+        logger.warning("DuckDuckGo search failed: %s", e)
         return results
 
-    import re
-    # Parse DuckDuckGo HTML results
-    # Find all result blocks: look for <a class="result__a" ...> links
-    # and their sibling result__snippet elements
-    link_pattern = re.compile(
-        r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="(.*?)"[^>]*>(.*?)</a>',
-        re.DOTALL,
-    )
-    snippet_pattern = re.compile(
-        r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
-        re.DOTALL,
-    )
-    # Broader: find all result__body divs
+    # Strategy 1: Parse result__body divs (current DDG markup)
     result_blocks = re.findall(
         r'<div[^>]*class="[^"]*result__body[^"]*"[^>]*>(.*?)</div>\s*</div>\s*</div>',
         html,
@@ -63,37 +64,54 @@ def _ddg_search(query: str, max_results: int = 5) -> list[SearchResult]:
     )
 
     for block in result_blocks[:max_results]:
-        # Extract link
         link_m = re.search(
             r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>',
             block,
             re.DOTALL,
         )
-        # Extract snippet
         snippet_m = re.search(
             r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</(?:a|span)>',
             block,
             re.DOTALL,
         )
         if link_m:
-            title = re.sub(r"<[^>]+>", "", link_m.group(2)).strip()
+            title = _clean_html(link_m.group(2))
             link = link_m.group(1).strip()
-            snippet = ""
-            if snippet_m:
-                snippet = re.sub(r"<[^>]+>", "", snippet_m.group(1)).strip()
+            snippet = _clean_html(snippet_m.group(1)) if snippet_m else ""
             results.append(SearchResult(title=title, url=link, snippet=snippet))
 
-    # Fallback: simpler parsing if result_blocks didn't match
+    # Strategy 2: Fallback — parse result__a links and result__snippet elements
     if not results:
+        link_pattern = re.compile(
+            r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="(.*?)"[^>]*>(.*?)</a>',
+            re.DOTALL,
+        )
+        snippet_pattern = re.compile(
+            r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+            re.DOTALL,
+        )
         all_links = link_pattern.findall(html)
         all_snippets = snippet_pattern.findall(html)
         for i, (link, raw_title) in enumerate(all_links[:max_results]):
-            title = re.sub(r"<[^>]+>", "", raw_title).strip()
-            snippet = ""
-            if i < len(all_snippets):
-                snippet = re.sub(r"<[^>]+>", "", all_snippets[i]).strip()
+            title = _clean_html(raw_title)
+            snippet = _clean_html(all_snippets[i]) if i < len(all_snippets) else ""
             if title and link:
                 results.append(SearchResult(title=title, url=link.strip(), snippet=snippet))
+
+    # Strategy 3: Last resort — generic article/link extraction
+    if not results:
+        article_pattern = re.compile(
+            r'<article[^>]*>(.*?)</article>',
+            re.DOTALL,
+        )
+        for article in article_pattern.findall(html)[:max_results]:
+            link_m = re.search(r'href="(https?://[^"]+)"', article)
+            title_m = re.search(r'<h[23][^>]*>(.*?)</h[23]>', article)
+            snippet_m = re.search(r'<p[^>]*>(.*?)</p>', article)
+            if link_m:
+                title = _clean_html(title_m.group(1)) if title_m else ""
+                snippet = _clean_html(snippet_m.group(1)) if snippet_m else ""
+                results.append(SearchResult(title=title, url=link_m.group(1), snippet=snippet))
 
     # Ensure full URLs
     for r in results:
@@ -102,6 +120,7 @@ def _ddg_search(query: str, max_results: int = 5) -> list[SearchResult]:
         elif r.url.startswith("/"):
             r.url = "https://duckduckgo.com" + r.url
 
+    logger.debug("DuckDuckGo returned %d results for '%s'", len(results), query)
     return results
 
 
@@ -126,10 +145,10 @@ def fetch_page(url: str, timeout: int = 15) -> str:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             html = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
+        logger.warning("Failed to fetch %s: %s", url, e)
         return f"Error fetching {url}: {e}"
 
     # Strip HTML tags
-    import re
     text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL)
     text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
     text = re.sub(r"<[^>]+>", " ", text)
@@ -142,7 +161,7 @@ def fetch_page(url: str, timeout: int = 15) -> str:
 # Search registry
 # ---------------------------------------------------------------------------
 
-_SEARCH_PROVIDERS: dict[str, Any] = {
+_SEARCH_PROVIDERS: dict[str, Callable[[str, int], list[SearchResult]]] = {
     "duckduckgo": _ddg_search,
 }
 

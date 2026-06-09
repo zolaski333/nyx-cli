@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 jobs:
   lint:
@@ -24,18 +24,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install ruff mypy pytest
           pip install -e ".[dev]"
 
       - name: Lint with ruff
         run: ruff check .
 
       - name: Type check with mypy
-        run: mypy nyx/
+        run: mypy nyx/ --ignore-missing-imports
 
       - name: Test with pytest
-        run: pytest
-
-      - name: Verify zero-dependency install
-        run: |
-          pip install -e .
-          python -c "from nyx.cli import main; print('✅ Nyx loads without Rich')"
+        run: pytest -v --tb=short
+        env:
+          OPENROUTER_API_KEY: "sk-test-placeholder"

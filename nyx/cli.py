@@ -11,17 +11,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
 
-from nyx.config import Config
+from nyx.config import Config, ConfigError
 from nyx.providers import get_provider
 from nyx.mcp_client import MCPManager
 from nyx.skill_manager import SkillManager
 from nyx.subagent import SubagentManager
 from nyx.agent import Agent
 from nyx.memory import MemoryManager
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Try to import Rich TUI
@@ -202,7 +205,7 @@ def run_ansi_single(agent: Agent, prompt: str) -> None:
     on_token = _make_ansi_on_token()
     if agent.config.stream:
         print(f"{c('Agent', ASSISTANT_COLOR)}> ", end="", flush=True)
-    result = agent.run(prompt)
+    result = agent.run(prompt, on_token=on_token)
     if not agent.config.stream:
         print(f"{c('Agent', ASSISTANT_COLOR)}> {result}")
     else:
@@ -213,6 +216,17 @@ def run_ansi_single(agent: Agent, prompt: str) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    """Configure logging for the application."""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
 
 
 def main() -> None:
@@ -236,14 +250,20 @@ def main() -> None:
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
     parser.add_argument("--no-rich", action="store_true", help="Force basic CLI even if Rich is installed")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
 
     args = parser.parse_args()
+    _setup_logging(args.verbose)
 
     if args.no_color:
         os.environ["NO_COLOR"] = "1"
 
     # Load config
-    config = Config.load(args.config if args.config else None)
+    try:
+        config = Config.load(args.config if args.config else None)
+    except ConfigError as e:
+        print(f"{c(f'Configuration error: {e}', ERROR_COLOR)}", file=sys.stderr)
+        sys.exit(1)
 
     # CLI overrides
     if args.model:
@@ -257,6 +277,8 @@ def main() -> None:
     else:
         # Default to current working directory
         config.project_dir = os.getcwd()
+
+    logger.info("Starting Nyx with provider=%s model=%s", config.provider, config.model)
 
     # Build agent with all subsystems
     provider = get_provider(config)

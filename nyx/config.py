@@ -7,10 +7,13 @@ with a strict priority chain.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
@@ -38,6 +41,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "openai_base_url": "https://api.openai.com/v1/chat/completions",
     "anthropic_base_url": "https://api.anthropic.com/v1/messages",
 }
+
+
+# ---------------------------------------------------------------------------
+# ConfigError
+# ---------------------------------------------------------------------------
+
+
+class ConfigError(Exception):
+    """Raised when configuration is invalid or missing."""
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +97,9 @@ class Config:
             with path.open("r", encoding="utf-8") as f:
                 file_config = json.load(f)
             raw.update(file_config)
+            logger.info("Loaded config from %s", path)
+        else:
+            logger.info("No config file at %s, using defaults", path)
 
         # 3. Environment variables override (highest priority)
         env_map: dict[str, str] = {
@@ -98,19 +113,22 @@ class Config:
             val = os.environ.get(env_key, "").strip()
             if val:
                 raw[config_key] = val
+                logger.debug("Override %s from env var %s", config_key, env_key)
 
         # 4. Validate required keys
         provider = raw.get("provider", "openrouter")
         api_key = raw.get(f"{provider}_api_key", "")
         if not api_key:
-            print(
-                f"[!] No API key found for provider '{provider}'.\n"
-                f"    Set {provider.upper()}_API_KEY env var or add it to config.json."
+            raise ConfigError(
+                f"No API key found for provider '{provider}'.\n"
+                f"Set {provider.upper()}_API_KEY env var or add it to config.json."
             )
-            raise SystemExit(1)
 
-        raw["raw"] = raw
-        return cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
+        # Store a copy of raw config (not self-referencing)
+        raw_copy = dict(raw)
+        config = cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
+        config.raw = raw_copy
+        return config
 
     def get_api_key(self) -> str:
         return getattr(self, f"{self.provider}_api_key", "")

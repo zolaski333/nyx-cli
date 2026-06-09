@@ -3,11 +3,12 @@ Nyx — the core agentic loop.
 
 Orchestrates: LLM calls → tool execution → context management.
 Supports: skills, MCP tools, web search, subagents (sync + parallel),
-         persistent memory, summarisation, code execution.
+          persistent memory, summarisation, code execution.
 """
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -20,6 +21,8 @@ from nyx.subagent import SubagentManager
 from nyx.async_subagent import AsyncSubagentManager, ParallelTask
 from nyx.memory import MemoryManager
 from nyx.web_search import search_web, format_search_results, fetch_page
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +115,7 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="execute_command",
-        description="Execute a shell command on the local system. Be very careful with this tool.",
+        description="Execute a shell command on the local system. Only safe, read-only commands are allowed (ls, cat, grep, find, git status, etc.).",
         parameters={
             "type": "object",
             "properties": {
@@ -226,6 +229,45 @@ class AgentContext:
 class Agent:
     """The main agent that orchestrates everything."""
 
+    # ------------------------------------------------------------------
+    # Command sandbox — safe commands (read-only, non-destructive)
+    # ------------------------------------------------------------------
+    SAFE_COMMANDS: list[str] = [
+        "ls", "cat", "head", "tail", "echo", "pwd", "which", "whoami",
+        "date", "uname", "find", "grep", "wc", "sort", "diff", "file",
+        "python --version", "python3 --version", "pip list", "pip freeze",
+        "node --version", "npm --version", "git status", "git log",
+        "git diff", "git branch", "git remote",
+    ]
+
+    # Commands that are explicitly blocked (destructive)
+    DANGEROUS_PATTERNS: list[str] = [
+        "rm ", "rmdir ", "mv ", "cp ", "chmod ", "chown ", "dd ",
+        ">", ">>", "|", "sudo ", "su ", "passwd", "kill ",
+        "mkfs", "fdisk", "mount", "umount", "iptables",
+        "wget ", "curl ", "apt ", "yum ", "dnf ", "pacman",
+        "pip install", "npm install", "git push", "git reset",
+        "git rebase", "git merge", "git cherry-pick",
+    ]
+
+    @staticmethod
+    def _is_safe_command(command: str) -> bool:
+        """Check if a command is in the safe list."""
+        cmd_stripped = command.strip()
+        for safe in Agent.SAFE_COMMANDS:
+            if cmd_stripped == safe or cmd_stripped.startswith(safe + " "):
+                return True
+        return False
+
+    @staticmethod
+    def _is_dangerous_command(command: str) -> bool:
+        """Check if a command matches dangerous patterns."""
+        cmd_lower = command.strip().lower()
+        for pattern in Agent.DANGEROUS_PATTERNS:
+            if pattern in cmd_lower:
+                return True
+        return False
+
     def __init__(
         self,
         config: Config,
@@ -259,6 +301,7 @@ class Agent:
         """Connect MCP servers and discover skills."""
         # MCP
         if self.config.mcp_servers:
+            logger.info("Connecting MCP servers...")
             print("\n🔌 Connecting MCP servers...")
             self.mcp.connect_all(self.config.mcp_servers)
             self._all_tools.extend(self.mcp.get_tool_definitions())
@@ -266,6 +309,7 @@ class Agent:
         # Skills
         skills_dir = self.config.skills_dir
         if skills_dir:
+            logger.info("Loading skills from %s", skills_dir)
             print("🧠 Loading skills...")
             skills_found = self.skills.discover(skills_dir)
             if skills_found:
@@ -275,6 +319,7 @@ class Agent:
         if self.config.project_dir:
             self.context.add("system", f"The current working directory is: {self.config.project_dir}")
 
+        logger.info("Total tools available: %d", len(self._all_tools))
         print(f"\n📦 Total tools available: {len(self._all_tools)}")
 
     @property
@@ -293,8 +338,10 @@ class Agent:
         self.call_depth += 1
         if self.call_depth > self.max_depth:
             self.call_depth -= 1
+            logger.warning("Max reasoning depth reached (%d)", self.max_depth)
             return "I've reached the maximum number of reasoning steps. Please ask me to continue or refine your request."
 
+        logger.debug("LLM call (depth=%d, messages=%d)", self.call_depth, len(self.context.messages))
         try:
             response = self.provider.chat(
                 messages=self.context.messages,
@@ -304,10 +351,13 @@ class Agent:
             )
         except Exception as e:
             self.call_depth -= 1
+            logger.error("LLM call failed: %s", e)
             return f"Error calling LLM: {e}"
 
         # Handle tool calls
         if response.tool_calls:
+            tool_names = [tc.name for tc in response.tool_calls]
+            logger.info("Tool calls: %s", tool_names)
             self.context.messages.append({
                 "role": "assistant",
                 "content": response.content or None,
@@ -328,6 +378,7 @@ class Agent:
 
         # No tool calls — final response
         if response.content:
+            logger.debug("Final response (%d chars)", len(response.content))
             self.context.add("assistant", response.content)
             self.memory.add_entry("assistant", response.content)
 
@@ -410,6 +461,25 @@ class Agent:
                 import subprocess
                 command = args.get("command", "")
                 timeout = args.get("timeout", 30)
+
+                # Sandbox checks
+                if not self._is_safe_command(command):
+                    if self._is_dangerous_command(command):
+                        logger.warning("Blocked dangerous command: %s", command)
+                        return (
+                            f"[SECURITY] Command blocked for safety: '{command[:100]}'\n"
+                            f"This command matches a dangerous pattern. Only safe commands "
+                            f"(read-only: ls, cat, grep, find, etc.) are allowed by default."
+                        )
+                    logger.warning("Command not in safe list: %s", command)
+                    return (
+                        f"[SECURITY] Command not allowed: '{command[:100]}'\n"
+                        f"Only safe commands are permitted. Allowed: ls, cat, head, tail, "
+                        f"echo, pwd, which, date, uname, find, grep, wc, sort, file, "
+                        f"python --version, git status, git log, git diff, etc."
+                    )
+
+                logger.info("Executing command: %s", command)
                 try:
                     proc = subprocess.run(
                         command, shell=True, capture_output=True, text=True, timeout=timeout,
@@ -417,11 +487,15 @@ class Agent:
                     out = proc.stdout or ""
                     err = proc.stderr or ""
                     if proc.returncode != 0:
+                        logger.warning("Command exit code %d: %s", proc.returncode, command)
                         return f"Exit code: {proc.returncode}\nstdout:\n{out[:3000]}\nstderr:\n{err[:2000]}"
+                    logger.debug("Command succeeded: %s", command)
                     return out[:5000] or "(no output)"
                 except subprocess.TimeoutExpired:
+                    logger.warning("Command timed out (%ds): %s", timeout, command)
                     return f"Command timed out after {timeout}s."
                 except Exception as e:
+                    logger.error("Command error: %s", e)
                     return f"Command error: {e}"
 
             if name == "read_file":
@@ -440,6 +514,7 @@ class Agent:
                 content = args.get("content", "")
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content, encoding="utf-8")
+                logger.info("File written: %s (%d bytes)", args["path"], len(content))
                 return f"File written: {args['path']} ({len(content)} bytes)"
 
             if name == "append_file":
@@ -448,6 +523,7 @@ class Agent:
                 p.parent.mkdir(parents=True, exist_ok=True)
                 with p.open("a", encoding="utf-8") as f:
                     f.write(args.get("content", ""))
+                logger.info("Content appended to: %s", args["path"])
                 return f"Content appended to: {args['path']}"
 
             if name == "list_files":
@@ -475,9 +551,11 @@ class Agent:
             if name.startswith("skill_"):
                 return self.skills.execute_skill(name[6:], args)
 
+            logger.warning("Unknown tool called: %s", name)
             return f"Unknown tool: {name}"
 
         except Exception as e:
+            logger.error("Tool '%s' error: %s", name, e)
             return f"Tool '{name}' error: {e}"
 
     def reset_context(self) -> None:

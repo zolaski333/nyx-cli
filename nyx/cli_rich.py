@@ -260,7 +260,7 @@ def run_rich_single(agent: Agent, prompt: str) -> None:
     if agent.config.stream:
         console.print("[bold magenta]Agent[/bold magenta]> ", end="")
 
-    result = agent.run(prompt)
+    result = agent.run(prompt, on_token=on_token)
 
     if not agent.config.stream:
         console.print(format_content(result))
