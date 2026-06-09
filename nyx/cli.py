@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 from nyx.config import Config, ConfigError
 from nyx.providers import get_provider
@@ -124,8 +125,23 @@ def print_tools(agent: Agent) -> None:
     print()
 
 
+def _make_ansi_approval_handler() -> Callable[[str], tuple[bool, str]]:
+    """Create an interactive approval handler for the ANSI fallback CLI."""
+    def handle_approval(command: str) -> tuple[bool, str]:
+        print(f"\n{c('⚠️  SECURITY', YELLOW)} The AI wants to execute a potentially dangerous command:")
+        print(f"  {c(command, CYAN)}")
+        response = input(f"  {c('Allow?', BOLD)} (y/n): ").strip().lower()
+        if response == "y":
+            return True, ""
+        else:
+            reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
+            return False, reason or "User denied the command."
+    return handle_approval
+
+
 def run_ansi_interactive(agent: Agent, config: Config) -> None:
     """Fallback interactive REPL (no Rich)."""
+    agent.on_command_approval = _make_ansi_approval_handler()
     print_welcome(config, len(agent.tools))
 
     while True:

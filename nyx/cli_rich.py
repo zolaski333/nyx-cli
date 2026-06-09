@@ -141,9 +141,24 @@ def _make_rich_on_token() -> Callable[[str], None]:
 # ---------------------------------------------------------------------------
 
 
+def _make_rich_approval_handler(console) -> Callable[[str], tuple[bool, str]]:
+    """Create an interactive approval handler using Rich prompts."""
+    def handle_approval(command: str) -> tuple[bool, str]:
+        console.print("\n[bold yellow]⚠️  SECURITY[/bold yellow] The AI wants to execute a potentially dangerous command:")
+        console.print(f"  [cyan]{command}[/cyan]")
+        response = console.input(f"  [bold]Allow?[/bold] (y/n): ").strip().lower()
+        if response == "y":
+            return True, ""
+        else:
+            reason = console.input(f"  [dim]Reason for denial:[/dim] ").strip()
+            return False, reason or "User denied the command."
+    return handle_approval
+
+
 def run_rich_interactive(agent: Agent, config: Config) -> None:
     """Run the interactive REPL with Rich formatting."""
     console = get_console()
+    agent.on_command_approval = _make_rich_approval_handler(console)
     console.clear()
     console.print(welcome_panel(config, len(agent.tools)))
 

@@ -153,9 +153,13 @@ class OpenRouterProvider(BaseLLMProvider):
             raw_args = tc.arguments
             if isinstance(raw_args, dict) and "_buffer" in raw_args:
                 try:
-                    tc.arguments = json.loads(raw_args["_buffer"])
+                    parsed = json.loads(raw_args["_buffer"])
+                    if isinstance(parsed, dict):
+                        tc.arguments = parsed
+                    else:
+                        tc.arguments = {"_raw_buffer": raw_args["_buffer"]}
                 except (json.JSONDecodeError, TypeError):
-                    tc.arguments = {}
+                    tc.arguments = {"_raw_buffer": raw_args["_buffer"]}
             final_tool_calls.append(tc)
 
         if on_token and full_content:

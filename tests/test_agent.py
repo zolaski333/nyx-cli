@@ -55,14 +55,6 @@ class TestAgentSandbox:
         self.config = Config(openrouter_api_key="sk-test")
         self.agent = Agent(config=self.config)
 
-    def test_safe_commands_allowed(self):
-        assert self.agent._is_safe_command("ls")
-        assert self.agent._is_safe_command("cat file.txt")
-        assert self.agent._is_safe_command("grep -r 'pattern' .")
-        assert self.agent._is_safe_command("git status")
-        assert self.agent._is_safe_command("python --version")
-        assert self.agent._is_safe_command("pwd")
-
     def test_dangerous_commands_detected(self):
         assert self.agent._is_dangerous_command("rm -rf /")
         assert self.agent._is_dangerous_command("sudo apt install")
@@ -75,33 +67,50 @@ class TestAgentSandbox:
         assert not self.agent._is_dangerous_command("cat file.txt")
         assert not self.agent._is_dangerous_command("git status")
 
-    def test_unknown_command_not_safe(self):
-        assert not self.agent._is_safe_command("some_random_tool")
-        assert not self.agent._is_safe_command("docker ps")
-
     def test_execute_safe_command(self):
         """A safe command should execute successfully."""
         tc = ToolCall(id="1", name="execute_command", arguments={"command": "echo hello"})
         result = self.agent._execute_tool(tc)
         assert "hello" in result
 
-    def test_execute_dangerous_command_blocked(self):
-        """A dangerous command should be blocked."""
-        tc = ToolCall(id="2", name="execute_command", arguments={"command": "rm -rf /tmp/test"})
+    def test_empty_command_returns_error(self):
+        """An empty command should return a clear error message."""
+        tc = ToolCall(id="1", name="execute_command", arguments={"command": ""})
         result = self.agent._execute_tool(tc)
-        assert "SECURITY" in result
-        assert "blocked" in result.lower()
+        assert "ERROR" in result
+        assert "Empty command" in result
 
-    def test_execute_unknown_command_blocked(self):
-        """An unknown command should be blocked."""
-        tc = ToolCall(id="3", name="execute_command", arguments={"command": "docker ps"})
+    def test_unknown_command_now_allowed(self):
+        """Unknown commands should now be allowed by default (no more whitelist)."""
+        tc = ToolCall(id="2", name="execute_command", arguments={"command": "which python3"})
         result = self.agent._execute_tool(tc)
-        assert "SECURITY" in result
-        assert "not allowed" in result.lower()
+        # Should NOT contain SECURITY — unknown commands are now allowed
+        assert "SECURITY" not in result
+
+    def test_dangerous_command_requires_approval(self):
+        """A dangerous command should trigger the approval flow and be denied if user refuses."""
+        self.agent.on_command_approval = lambda cmd: (False, "Testing: command not allowed")
+        tc = ToolCall(id="3", name="execute_command", arguments={"command": "rm -rf /tmp/test"})
+        result = self.agent._execute_tool(tc)
+        assert "denied by user" in result.lower()
+        assert "Testing" in result
+
+    def test_dangerous_command_approved(self):
+        """A dangerous command should execute if the user approves it."""
+        self.agent.on_command_approval = lambda cmd: (True, "")
+        tc = ToolCall(id="4", name="execute_command", arguments={"command": "echo approved_dangerous"})
+        result = self.agent._execute_tool(tc)
+        assert "approved_dangerous" in result
+
+    def test_dangerous_command_no_approval_callback(self):
+        """A dangerous command should be denied by default if no approval callback is set."""
+        tc = ToolCall(id="5", name="execute_command", arguments={"command": "rm -rf /tmp/test"})
+        result = self.agent._execute_tool(tc)
+        assert "denied by user" in result.lower() or "SECURITY" in result
 
     def test_unknown_tool(self):
         """An unknown tool should return an error message."""
-        tc = ToolCall(id="4", name="nonexistent_tool", arguments={})
+        tc = ToolCall(id="6", name="nonexistent_tool", arguments={})
         result = self.agent._execute_tool(tc)
         assert "Unknown tool" in result
 

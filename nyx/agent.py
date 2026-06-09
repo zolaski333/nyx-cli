@@ -115,7 +115,7 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="execute_command",
-        description="Execute a shell command on the local system. Only safe, read-only commands are allowed (ls, cat, grep, find, git status, etc.).",
+        description="Execute a shell command on the local system. Most commands are allowed. Destructive commands (rm, sudo, chmod, curl, etc.) require user approval before execution.",
         parameters={
             "type": "object",
             "properties": {
@@ -229,18 +229,8 @@ class AgentContext:
 class Agent:
     """The main agent that orchestrates everything."""
 
-    # ------------------------------------------------------------------
-    # Command sandbox — safe commands (read-only, non-destructive)
-    # ------------------------------------------------------------------
-    SAFE_COMMANDS: list[str] = [
-        "ls", "cat", "head", "tail", "echo", "pwd", "which", "whoami",
-        "date", "uname", "find", "grep", "wc", "sort", "diff", "file",
-        "python --version", "python3 --version", "pip list", "pip freeze",
-        "node --version", "npm --version", "git status", "git log",
-        "git diff", "git branch", "git remote",
-    ]
-
     # Commands that are explicitly blocked (destructive)
+    # These will trigger an interactive user approval prompt.
     DANGEROUS_PATTERNS: list[str] = [
         "rm ", "rmdir ", "mv ", "cp ", "chmod ", "chown ", "dd ",
         ">", ">>", "|", "sudo ", "su ", "passwd", "kill ",
@@ -248,16 +238,8 @@ class Agent:
         "wget ", "curl ", "apt ", "yum ", "dnf ", "pacman",
         "pip install", "npm install", "git push", "git reset",
         "git rebase", "git merge", "git cherry-pick",
+        "docker ", "systemctl", "journalctl",
     ]
-
-    @staticmethod
-    def _is_safe_command(command: str) -> bool:
-        """Check if a command is in the safe list."""
-        cmd_stripped = command.strip()
-        for safe in Agent.SAFE_COMMANDS:
-            if cmd_stripped == safe or cmd_stripped.startswith(safe + " "):
-                return True
-        return False
 
     @staticmethod
     def _is_dangerous_command(command: str) -> bool:
@@ -267,6 +249,18 @@ class Agent:
             if pattern in cmd_lower:
                 return True
         return False
+
+    def _request_command_approval(self, command: str) -> tuple[bool, str]:
+        """Request user approval for a potentially dangerous command.
+
+        Returns (approved: bool, reason: str).
+        If no approval callback is configured, the command is denied by default.
+        """
+        if self.on_command_approval:
+            return self.on_command_approval(command)
+        # Default: deny if no approval mechanism is configured
+        logger.warning("No approval callback configured, denying dangerous command: %s", command)
+        return False, "No approval mechanism configured. This command requires manual approval."
 
     def __init__(
         self,
@@ -278,6 +272,7 @@ class Agent:
         memory_manager: MemoryManager | None = None,
         async_subagent_manager: AsyncSubagentManager | None = None,
         on_token: Callable[[str], None] | None = None,
+        on_command_approval: Callable[[str], tuple[bool, str]] | None = None,
     ) -> None:
         self.config = config
         self.provider = provider or get_provider(config)
@@ -290,6 +285,7 @@ class Agent:
             provider_factory=lambda: get_provider(config),
         )
         self.on_token = on_token
+        self.on_command_approval = on_command_approval
         self.context = AgentContext()
         self.call_depth = 0
         self.max_depth = 15
@@ -459,26 +455,35 @@ class Agent:
             # -- File system tools --
             if name == "execute_command":
                 import subprocess
-                command = args.get("command", "")
+                command = args.get("command", "").strip()
                 timeout = args.get("timeout", 30)
 
-                # Sandbox checks
-                if not self._is_safe_command(command):
-                    if self._is_dangerous_command(command):
-                        logger.warning("Blocked dangerous command: %s", command)
-                        return (
-                            f"[SECURITY] Command blocked for safety: '{command[:100]}'\n"
-                            f"This command matches a dangerous pattern. Only safe commands "
-                            f"(read-only: ls, cat, grep, find, etc.) are allowed by default."
-                        )
-                    logger.warning("Command not in safe list: %s", command)
-                    return (
-                        f"[SECURITY] Command not allowed: '{command[:100]}'\n"
-                        f"Only safe commands are permitted. Allowed: ls, cat, head, tail, "
-                        f"echo, pwd, which, date, uname, find, grep, wc, sort, file, "
-                        f"python --version, git status, git log, git diff, etc."
+                # Validate that the command is not empty
+                if not command:
+                    logger.warning("Empty command received from AI (args=%s)", args)
+                    raw = args.get("_raw_buffer", "")
+                    msg = (
+                        "[ERROR] Empty command received. You must provide a valid shell command "
+                        "in the 'command' parameter. For example: 'ls -la', 'cat file.txt', "
+                        "'python3 script.py', 'which python3', etc."
                     )
+                    if raw:
+                        msg += f"\n(debug: raw arguments buffer was: {raw[:500]})"
+                    return msg
 
+                # If the command matches dangerous patterns, request user approval
+                if self._is_dangerous_command(command):
+                    approved, reason = self._request_command_approval(command)
+                    if not approved:
+                        logger.warning("User denied dangerous command: %s", command)
+                        return (
+                            f"[SECURITY] Command denied by user: '{command[:200]}'\n"
+                            f"Reason: {reason}\n"
+                            f"Please try a different approach that doesn't require this command."
+                        )
+                    logger.info("User approved dangerous command: %s", command)
+
+                # All commands (safe or approved dangerous) are executed here
                 logger.info("Executing command: %s", command)
                 try:
                     proc = subprocess.run(
