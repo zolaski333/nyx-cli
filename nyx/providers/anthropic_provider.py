@@ -137,13 +137,18 @@ class AnthropicProvider(BaseLLMProvider):
                         idx = str(event.get("index", 0))
                         partial = delta.get("partial_json", "")
                         if idx not in tool_calls_buffer:
-                            tc = event.get("content_block", {}).get("tool_use", {})
+                            # content_block_delta does NOT have content_block;
+                            # the tool_use id/name come from content_block_start
                             tool_calls_buffer[idx] = ToolCall(
-                                id=tc.get("id", idx),
-                                name=tc.get("name", ""),
+                                id=idx,
+                                name="",
                                 arguments={"__partial": ""},
                             )
-                        tool_calls_buffer[idx].arguments["__partial"] += partial
+                        # Ensure arguments is a dict with __partial before accumulating
+                        if isinstance(tool_calls_buffer[idx].arguments, dict):
+                            if "__partial" not in tool_calls_buffer[idx].arguments:
+                                tool_calls_buffer[idx].arguments["__partial"] = ""
+                            tool_calls_buffer[idx].arguments["__partial"] += partial
                 elif e_type == "content_block_start":
                     cb = event.get("content_block", {})
                     if cb.get("type") == "tool_use":

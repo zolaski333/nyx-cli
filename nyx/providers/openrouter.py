@@ -140,12 +140,12 @@ class OpenRouterProvider(BaseLLMProvider):
                     if t_name:
                         tool_calls[idx].name = t_name
                     if t_args:
-                        existing = tool_calls[idx].arguments
-                        if isinstance(existing, dict):
-                            pass
+                        # Accumulate streaming JSON fragments in a buffer
+                        current = tool_calls[idx].arguments
+                        if isinstance(current, dict) and "_buffer" in current:
+                            current["_buffer"] += t_args
                         else:
-                            combined = (tool_calls[idx].arguments.get("_buffer", "") if isinstance(tool_calls[idx].arguments, dict) else "") + t_args
-                            tool_calls[idx].arguments = {"_buffer": combined}
+                            tool_calls[idx].arguments = {"_buffer": t_args}
 
         # Parse buffered arguments
         final_tool_calls = []

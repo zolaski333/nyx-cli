@@ -187,6 +187,11 @@ class MemoryManager:
     def current(self) -> Conversation | None:
         return self._conversations.get(self._current_id)
 
+    @property
+    def conversations(self) -> dict[str, Conversation]:
+        """Expose all conversations (read-only access for search)."""
+        return dict(self._conversations)
+
     def switch_to(self, conv_id: str) -> bool:
         """Switch to an existing conversation."""
         if conv_id in self._conversations:
@@ -318,11 +323,12 @@ class MemoryManager:
 
         summary_text = self._generate_summary(old_text, conv.summary)
 
-        # Replace entries with summary
-        conv.summary = summary_text
-        conv.entries = to_keep
-        conv.total_tokens = sum(e.token_count for e in to_keep)
-        self._auto_save()
+        # Only replace entries if we got a valid summary back
+        if summary_text and summary_text.strip():
+            conv.summary = summary_text
+            conv.entries = to_keep
+            conv.total_tokens = sum(e.token_count for e in to_keep)
+            self._auto_save()
 
     def _generate_summary(self, old_text: str, existing_summary: str) -> str:
         """Use the LLM to generate a summary, or fallback to a simple compression."""
@@ -364,6 +370,31 @@ class MemoryManager:
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
+
+    def _notes_path(self) -> Path:
+        return self._dir / "notes.json"
+
+    def _save_note(self, content: str, tags: str = "") -> None:
+        """Save a note to the dedicated notes store (persistent across conversations)."""
+        notes = self._load_notes()
+        notes.append({
+            "content": content,
+            "tags": tags,
+            "timestamp": time.time(),
+        })
+        with self._notes_path().open("w", encoding="utf-8") as f:
+            json.dump(notes, f, ensure_ascii=False, indent=2)
+
+    def _load_notes(self) -> list[dict[str, Any]]:
+        """Load saved notes from the notes store."""
+        path = self._notes_path()
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+        return []
 
     def _auto_save(self) -> None:
         """Save the current conversation to disk."""

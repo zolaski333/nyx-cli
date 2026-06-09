@@ -5,7 +5,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="nyx",
-    version="0.2.0",
+    version="0.2.1",
     description="Zero-dependency agentic coding CLI — MCP, subagents, skills, web search, multi-provider",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",

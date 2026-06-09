@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
+EXAMPLE_CONFIG_PATH = PROJECT_DIR / "config.example.json"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -33,8 +34,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_tokens": 4096,
     "temperature": 0.7,
     "mcp_servers": {},
-    "skills_dir": str(PROJECT_DIR / "skills"),
-    "subagents_dir": str(PROJECT_DIR / "subagents"),
+    "skills_dir": "skills",
+    "subagents_dir": "subagents",
     "web_search_enabled": True,
     "web_search_provider": "duckduckgo",
     "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",
@@ -92,7 +93,13 @@ class Config:
         # 1. Start with defaults
         raw: dict[str, Any] = dict(DEFAULT_CONFIG)
 
-        # 2. Overlay config.json
+        # 2. Overlay config.json (or config.example.json as fallback)
+        if not path.exists():
+            # Try config.example.json as a fallback
+            if EXAMPLE_CONFIG_PATH.exists():
+                logger.info("No config.json found, using config.example.json as template")
+                path = EXAMPLE_CONFIG_PATH
+
         if path.exists():
             with path.open("r", encoding="utf-8") as f:
                 file_config = json.load(f)

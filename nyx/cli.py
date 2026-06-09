@@ -70,7 +70,7 @@ def c(text: str, color: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _make_ansi_on_token() -> callable:
+def _make_ansi_on_token() -> Callable[[str], None]:
     buffer: list[str] = []
 
     def on_token(token: str) -> None:
@@ -149,6 +149,7 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
             user_input = input(f"\n{c('You', USER_COLOR)}> ").strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{c('Bye! 👋', GREEN)}")
+            agent.memory.save_all()
             break
 
         if not user_input:
@@ -157,6 +158,7 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
         # Built-in commands
         if user_input in {"/exit", "/quit", "/q"}:
             print(f"{c('Bye! 👋', GREEN)}")
+            agent.memory.save_all()
             break
         if user_input in {"/help", "/?"}:
             print(HELP_TEXT)

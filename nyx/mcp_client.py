@@ -82,13 +82,17 @@ class MCPSession:
         if not cmd:
             raise RuntimeError(f"MCP server '{self.name}': no 'command' in config.")
 
-        merged_env = dict(env) if env else {}
+        # Inherit parent environment and overlay MCP-specific env vars
+        import os as _os
+        merged_env = dict(_os.environ)
+        if env:
+            merged_env.update(env)
         self._proc = subprocess.Popen(
             [cmd, *args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=merged_env if merged_env else None,
+            env=merged_env,
         )
         if not self._proc.stdin or not self._proc.stdout:
             raise RuntimeError(f"MCP server '{self.name}': failed to open pipes.")

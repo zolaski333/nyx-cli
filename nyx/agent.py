@@ -205,13 +205,27 @@ class AgentContext:
             keep.extend(self.messages[-(self.max_history - len(keep)):])
             self.messages = keep
 
-    def add_tool_result(self, tool_call_id: str, name: str, content: str) -> None:
-        self.messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "name": name,
-            "content": content,
-        })
+    def add_tool_result(self, tool_call_id: str, name: str, content: str, use_anthropic_format: bool = False) -> None:
+        if use_anthropic_format:
+            # Anthropic uses "tool_use_id" and content blocks with role "user" for tool results
+            self.messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": [{"type": "text", "text": content}],
+                    }
+                ],
+            })
+        else:
+            # OpenAI-compatible format
+            self.messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": name,
+                "content": content,
+            })
 
     def clear(self) -> None:
         system_msgs = [m for m in self.messages if m["role"] == "system"]
@@ -231,23 +245,41 @@ class Agent:
 
     # Commands that are explicitly blocked (destructive)
     # These will trigger an interactive user approval prompt.
+    # Uses word-boundary matching to avoid false positives
+    # (e.g., "cp " won't match "scp ", "mv " won't match "tmux ").
     DANGEROUS_PATTERNS: list[str] = [
-        "rm ", "rmdir ", "mv ", "cp ", "chmod ", "chown ", "dd ",
-        ">", ">>", "|", "sudo ", "su ", "passwd", "kill ",
+        "rm", "rmdir", "mv", "cp", "chmod", "chown", "dd",
+        "sudo", "su", "passwd", "kill",
         "mkfs", "fdisk", "mount", "umount", "iptables",
-        "wget ", "curl ", "apt ", "yum ", "dnf ", "pacman",
+        "wget", "curl", "apt", "yum", "dnf", "pacman",
         "pip install", "npm install", "git push", "git reset",
         "git rebase", "git merge", "git cherry-pick",
-        "docker ", "systemctl", "journalctl",
+        "docker", "systemctl", "journalctl",
+    ]
+
+    # Operators that are dangerous in shell context (checked separately)
+    DANGEROUS_OPERATORS: list[str] = [
+        ">", ">>", "|",
     ]
 
     @staticmethod
     def _is_dangerous_command(command: str) -> bool:
-        """Check if a command matches dangerous patterns."""
+        """Check if a command matches dangerous patterns using word-boundary matching."""
+        import re
         cmd_lower = command.strip().lower()
-        for pattern in Agent.DANGEROUS_PATTERNS:
-            if pattern in cmd_lower:
+
+        # Check dangerous operators (only when used as standalone tokens)
+        # Avoid false positives: "||" should not match "|", "=>" should not match ">"
+        for op in Agent.DANGEROUS_OPERATORS:
+            # Match operator as a standalone token (not part of ||, &&, =>, etc.)
+            if re.search(rf'(?:^|\s){re.escape(op)}(?:\s|$)', cmd_lower):
                 return True
+
+        # Check dangerous commands using word boundaries
+        for pattern in Agent.DANGEROUS_PATTERNS:
+            if re.search(rf'\b{re.escape(pattern)}\b', cmd_lower):
+                return True
+
         return False
 
     def _request_command_approval(self, command: str) -> tuple[bool, str]:
@@ -354,9 +386,11 @@ class Agent:
         if response.tool_calls:
             tool_names = [tc.name for tc in response.tool_calls]
             logger.info("Tool calls: %s", tool_names)
+            # content must be a string (not None/null) for API compatibility
+            content_str = response.content if response.content else ""
             self.context.messages.append({
                 "role": "assistant",
-                "content": response.content or None,
+                "content": content_str,
                 "tool_calls": [
                     {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
                     for tc in response.tool_calls
@@ -365,10 +399,11 @@ class Agent:
 
             for tc in response.tool_calls:
                 result = self._execute_tool(tc)
-                self.context.add_tool_result(tc.id, tc.name, result)
+                use_anthropic = self.config.provider == "anthropic"
+                self.context.add_tool_result(tc.id, tc.name, result, use_anthropic_format=use_anthropic)
 
-            # Continue the loop
-            result = self._loop()
+            # Continue the loop (propagate on_token for recursive calls)
+            result = self._loop(on_token=on_token)
             self.call_depth -= 1
             return result
 
@@ -437,20 +472,46 @@ class Agent:
             # -- Memory tools --
             if name == "memory_save":
                 note = args.get("note", "")
-                tags = args.get("tags", "")
-                self.memory.add_entry("user", f"[SAVED NOTE:{tags}] {note}")
-                return f"Note saved to memory: {note[:100]}..."
+                tags_raw = args.get("tags", "")
+                # Store as a dedicated memory entry with role "memory"
+                self.memory.add_entry("memory", note)
+                # Also save to a dedicated notes file for persistence across conversations
+                self.memory._save_note(note, tags_raw)
+                tag_info = f" (tags: {tags_raw})" if tags_raw else ""
+                return f"Note saved to memory{tag_info}: {note[:100]}..."
 
             if name == "memory_recall":
                 query = args.get("query", "")
-                convs = self.memory.list_conversations()
+                if not query:
+                    return "Please provide a query to search for."
+
+                # Search across all conversation entries (including saved notes)
                 relevant = []
-                for c in convs:
-                    if query.lower() in c.get("summary", "").lower() or query.lower() in c.get("title", "").lower():
-                        relevant.append(f"- [{c['id'][:8]}] {c['title']} ({c['entry_count']} messages): {c['summary'][:200]}")
+
+                # Search within conversation entries (using full data, not truncated)
+                for c_id, conv in self.memory.conversations.items():
+                    # Search title
+                    if query.lower() in conv.title.lower():
+                        relevant.append(f"- [{c_id[:8]}] {conv.title} ({len(conv.entries)} messages): {conv.summary[:200]}")
+                    # Search summary
+                    if query.lower() in conv.summary.lower():
+                        relevant.append(f"- [{c_id[:8]}] {conv.title} ({len(conv.entries)} messages): {conv.summary[:200]}")
+                    # Search within entries
+                    for entry in conv.entries:
+                        if query.lower() in entry.content.lower():
+                            c_title = conv.title[:40]
+                            preview = entry.content[:200]
+                            relevant.append(f"- [{c_id[:8]}] {c_title}: {preview}")
+
+                # Search saved notes
+                notes = self.memory._load_notes()
+                for note in notes:
+                    if query.lower() in note["content"].lower() or query.lower() in note.get("tags", "").lower():
+                        relevant.append(f"- [NOTE] {note['content'][:200]}")
+
                 if not relevant:
                     return f"No relevant memories found for: {query}"
-                return "Relevant memories:\n" + "\n".join(relevant[:5])
+                return "Relevant memories:\n" + "\n".join(relevant[:10])
 
             # -- File system tools --
             if name == "execute_command":

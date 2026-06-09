@@ -167,6 +167,7 @@ def run_rich_interactive(agent: Agent, config: Config) -> None:
             user_input = console.input(f"\n[bold green]You[/bold green]> ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[bold green]Bye! 👋[/bold green]")
+            agent.memory.save_all()
             break
 
         if not user_input:
