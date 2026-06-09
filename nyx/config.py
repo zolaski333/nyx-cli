@@ -61,6 +61,7 @@ class Config:
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     skills_dir: str = ""
     subagents_dir: str = ""
+    project_dir: str = ""
     web_search_enabled: bool = True
     web_search_provider: str = "duckduckgo"
     openrouter_api_key: str = ""

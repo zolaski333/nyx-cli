@@ -33,33 +33,71 @@ Nyx is an **agentic coding CLI** that runs on **pure Python 3.10+ standard libra
 
 ## 🚀 Quick Start
 
+### 1. Prérequis
+
+- **Python 3.10+** ([télécharger](https://www.python.org/downloads/))
+- Une clé API chez [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys) ou [Anthropic](https://console.anthropic.com/)
+
+### 2. Installation
+
+<details>
+<summary><b>🐧 Linux / macOS</b></summary>
+
 ```bash
-# 1. Clone
+# Cloner le projet
 git clone https://github.com/nyx-cli/nyx.git
 cd nyx
 
-# 2. Configure your API key
+# Configurer ta clé API
 export OPENROUTER_API_KEY="sk-or-..."
-# or: export OPENAI_API_KEY="sk-..."
-# or: export ANTHROPIC_API_KEY="sk-ant-..."
+# ou : export OPENAI_API_KEY="sk-..."
+# ou : export ANTHROPIC_API_KEY="sk-ant-..."
 
-# 3. Run!
+# Installation globale (recommandée)
+pip install -e ".[tui]"
+
+# Lancer depuis n'importe quel dossier
+cd /chemin/vers/mon/projet
+nyx
+```
+
+> **Note** : Si tu es sur Ubuntu/Debian et que `pip` bloque avec `externally-managed-environment`, utilise `pipx` :
+> ```bash
+> pipx install ".[tui]"
+> nyx
+> ```
+</details>
+
+<details>
+<summary><b>🪟 Windows</b></summary>
+
+```powershell
+# Cloner le projet
+git clone https://github.com/nyx-cli/nyx.git
+cd nyx
+
+# Configurer ta clé API
+$env:OPENROUTER_API_KEY = "sk-or-..."
+# ou : $env:OPENAI_API_KEY = "sk-..."
+# ou : $env:ANTHROPIC_API_KEY = "sk-ant-..."
+
+# Installation globale (recommandée)
+pip install -e ".[tui]"
+
+# Lancer depuis n'importe quel dossier
+cd C:\chemin\vers\mon\projet
+nyx
+```
+</details>
+
+<details>
+<summary><b>🐳 Docker / sans installation</b></summary>
+
+```bash
+# Sans installation — depuis le dossier du projet
 python -m nyx.cli
 ```
-
-Or install it globally:
-
-```bash
-pip install -e .
-nyx
-```
-
-For a beautiful TUI (optional):
-
-```bash
-pip install -e ".[tui]"
-nyx
-```
+</details>
 
 ---
 
@@ -68,6 +106,10 @@ nyx
 ### Interactive REPL
 
 ```bash
+# Va dans le dossier où tu veux travailler
+cd /chemin/vers/mon/projet
+
+# Lance Nyx — il détecte automatiquement le répertoire courant
 nyx
 ```
 
@@ -96,6 +138,18 @@ nyx -m "openai/gpt-4o"
 nyx --provider anthropic
 ```
 
+### Working directory
+
+```bash
+# Par défaut, Nyx utilise le répertoire courant
+cd /mon/projet
+nyx
+
+# Tu peux aussi spécifier un répertoire différent
+nyx --dir /autre/chemin
+nyx --project /autre/chemin
+```
+
 ### Flags
 
 | Flag | Description |
@@ -104,6 +158,8 @@ nyx --provider anthropic
 | `-c, --config` | Path to custom config.json |
 | `-m, --model` | Override model (e.g. `openai/gpt-4o`) |
 | `--provider` | Override provider (`openrouter`, `openai`, `anthropic`) |
+| `-d, --dir` | Working directory for the AI (default: current dir) |
+| `--project` | Alias for `--dir` |
 | `--no-stream` | Disable streaming output |
 | `--no-color` | Disable ANSI color output |
 | `--no-rich` | Force basic CLI even if Rich is installed |

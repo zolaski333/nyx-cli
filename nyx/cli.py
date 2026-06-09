@@ -106,6 +106,8 @@ def print_welcome(config: Config, tool_count: int) -> None:
     print(f"  {c('Provider:', DIM)} {config.provider}")
     print(f"  {c('Model:', DIM)}    {config.model}")
     print(f"  {c('Tools:', DIM)}    {tool_count}")
+    if config.project_dir:
+        print(f"  {c('Project:', DIM)}  {config.project_dir}")
     print(f"  {c('Ready!', GREEN)} Type your request or {c('/help', CYAN)} for commands.\n")
 
 
@@ -186,7 +188,7 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
             print(f"{c('Agent', ASSISTANT_COLOR)}> ", end="", flush=True)
 
         try:
-            result = agent.run(user_input)
+            result = agent.run(user_input, on_token=on_token)
             if not config.stream:
                 print(f"{c('Agent', ASSISTANT_COLOR)}> {result}")
             else:
@@ -222,12 +224,15 @@ def main() -> None:
             "  nyx                               Interactive mode\n"
             "  nyx -p 'list all files'           Single prompt\n"
             "  nyx --config ./myconf.json        Custom config\n"
+            "  nyx --dir /path/to/project        Set working directory\n"
         ),
     )
     parser.add_argument("-p", "--prompt", type=str, default="", help="Run a single prompt and exit")
     parser.add_argument("-c", "--config", type=str, default="", help="Path to config.json")
     parser.add_argument("-m", "--model", type=str, default="", help="Override model (e.g. 'openai/gpt-4o')")
     parser.add_argument("--provider", type=str, default="", help="Override provider (openrouter, openai, anthropic)")
+    parser.add_argument("-d", "--dir", type=str, default="", help="Working directory for the AI")
+    parser.add_argument("--project", type=str, default="", help="Project directory (alias for --dir)")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming output")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
     parser.add_argument("--no-rich", action="store_true", help="Force basic CLI even if Rich is installed")
@@ -247,6 +252,11 @@ def main() -> None:
         config.provider = args.provider
     if args.no_stream:
         config.stream = False
+    if args.dir or args.project:
+        config.project_dir = args.dir or args.project
+    else:
+        # Default to current working directory
+        config.project_dir = os.getcwd()
 
     # Build agent with all subsystems
     provider = get_provider(config)

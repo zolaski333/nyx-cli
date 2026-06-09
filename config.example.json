@@ -17,6 +17,7 @@
   },
   "skills_dir": "skills",
   "subagents_dir": "subagents",
+  "project_dir": "",
   "web_search_enabled": true,
   "web_search_provider": "duckduckgo",
   "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",

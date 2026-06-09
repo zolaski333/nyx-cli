@@ -62,6 +62,8 @@ def welcome_panel(config: Config, tool_count: int) -> Any:
     grid.add_row("[dim]Provider:[/dim]", f"[green]{config.provider}[/green]")
     grid.add_row("[dim]Model:[/dim]", f"[yellow]{config.model}[/yellow]")
     grid.add_row("[dim]Tools:[/dim]", f"[blue]{tool_count}[/blue]")
+    if config.project_dir:
+        grid.add_row("[dim]Project:[/dim]", f"[white]{config.project_dir}[/white]")
     grid.add_row("", "")
     grid.add_row("[dim]Type /help for commands[/dim]", "")
 
@@ -233,7 +235,7 @@ def run_rich_interactive(agent: Agent, config: Config) -> None:
             console.print("[bold magenta]Agent[/bold magenta]> ", end="")
 
         try:
-            result = agent.run(user_input)
+            result = agent.run(user_input, on_token=on_token)
             if not config.stream:
                 console.print(format_content(result))
             else:

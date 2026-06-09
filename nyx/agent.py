@@ -271,20 +271,24 @@ class Agent:
             if skills_found:
                 self._all_tools.extend(self.skills.get_tool_definitions())
 
+        # Project directory
+        if self.config.project_dir:
+            self.context.add("system", f"The current working directory is: {self.config.project_dir}")
+
         print(f"\n📦 Total tools available: {len(self._all_tools)}")
 
     @property
     def tools(self) -> list[ToolDefinition]:
         return self._all_tools
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, on_token: Callable[[str], None] | None = None) -> str:
         """Process a user input through the agentic loop."""
         self.context.add("user", user_input)
         # Also save to persistent memory
         self.memory.add_entry("user", user_input)
-        return self._loop()
+        return self._loop(on_token=on_token)
 
-    def _loop(self) -> str:
+    def _loop(self, on_token: Callable[[str], None] | None = None) -> str:
         """The main agentic reasoning loop."""
         self.call_depth += 1
         if self.call_depth > self.max_depth:
@@ -296,7 +300,7 @@ class Agent:
                 messages=self.context.messages,
                 tools=self.tools if self.tools else None,
                 stream=self.config.stream,
-                on_token=self.on_token,
+                on_token=on_token or self.on_token,
             )
         except Exception as e:
             self.call_depth -= 1
