@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -21,6 +22,10 @@ from nyx.subagent import SubagentManager
 from nyx.async_subagent import AsyncSubagentManager, ParallelTask
 from nyx.memory import MemoryManager
 from nyx.web_search import search_web, format_search_results, fetch_page
+from nyx.permissions import PermissionManager, PermissionLevel
+from nyx.sandbox import Sandbox, PathTraversalError
+from nyx.audit import AuditTrail
+from nyx.diff_tool import PatchTool, compute_diff, compute_diff_from_path
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +143,7 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="write_file",
-        description="Write content to a file on the filesystem. Creates directories if needed.",
+        description="Write content to a file on the filesystem. Uses a diff/patch workflow with user approval for changes outside the project sandbox.",
         parameters={
             "type": "object",
             "properties": {
@@ -170,6 +175,19 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
                 "recursive": {"type": "boolean", "description": "List recursively", "default": False},
             },
             "required": [],
+        },
+    ),
+    ToolDefinition(
+        name="apply_diff",
+        description="Apply a targeted diff/patch to an existing file. Shows the changes as a unified diff and requires user approval. Preferred over write_file for modifying existing files.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the file to modify"},
+                "content": {"type": "string", "description": "The FULL new content of the file after applying changes"},
+                "description": {"type": "string", "description": "Brief description of what this change does"},
+            },
+            "required": ["path", "content"],
         },
     ),
     ToolDefinition(
@@ -305,6 +323,7 @@ class Agent:
         async_subagent_manager: AsyncSubagentManager | None = None,
         on_token: Callable[[str], None] | None = None,
         on_command_approval: Callable[[str], tuple[bool, str]] | None = None,
+        on_file_approval: Callable[[str, str, str], tuple[bool, str]] | None = None,
     ) -> None:
         self.config = config
         self.provider = provider or get_provider(config)
@@ -318,12 +337,45 @@ class Agent:
         )
         self.on_token = on_token
         self.on_command_approval = on_command_approval
+        self.on_file_approval = on_file_approval
         self.context = AgentContext()
         self.call_depth = 0
         self.max_depth = 15
 
+        # -- Security subsystems --
+        # Permission manager
+        self.permissions = PermissionManager(config.permissions_config if config.permissions_config else None)
+
+        # Sandbox (project root)
+        self.sandbox = Sandbox(
+            project_root=config.project_dir if config.sandbox_enabled else None,
+            allow_paths=config.sandbox_allow_paths,
+            deny_paths=config.sandbox_deny_paths,
+            auto_chdir=config.sandbox_auto_chdir,
+        )
+
+        # Audit trail
+        audit_dir = config.audit_output_dir or (config.project_dir + "/.nyx/audit" if config.project_dir else "")
+        self.audit = AuditTrail(
+            output_dir=audit_dir if audit_dir else None,
+            agent_id="nyx",
+            enabled=config.audit_enabled,
+            max_file_size_mb=config.audit_max_file_size_mb,
+        )
+
+        # Patch/diff tool
+        self.patch_tool = PatchTool(approval_callback=self._file_approval_handler)
+
         # Collect all tools
         self._all_tools: list[ToolDefinition] = list(BUILTIN_TOOLS)
+
+    def _file_approval_handler(self, path: str, summary: str, diff: str) -> tuple[bool, str]:
+        """Handle file operation approval requests from the PatchTool."""
+        if self.on_file_approval:
+            return self.on_file_approval(path, summary, diff)
+        # If no callback, check permissions
+        approved, reason, _ = self.permissions.authorize_file_write(path)
+        return approved, reason
 
     def setup(self) -> None:
         """Connect MCP servers and discover skills."""
@@ -343,9 +395,17 @@ class Agent:
             if skills_found:
                 self._all_tools.extend(self.skills.get_tool_definitions())
 
-        # Project directory
+        # Project directory / sandbox
         if self.config.project_dir:
-            self.context.add("system", f"The current working directory is: {self.config.project_dir}")
+            root_info = self.config.project_dir
+            if self.sandbox.root:
+                root_info = self.sandbox.root_str
+            self.context.add("system", f"The current working directory is: {root_info}")
+            self.context.add("system", (
+                "You are operating in a sandboxed environment. "
+                "All file operations are restricted to the project directory. "
+                "Use apply_diff for modifying existing files — it shows a diff and requires approval."
+            ))
 
         logger.info("Total tools available: %d", len(self._all_tools))
         print(f"\n📦 Total tools available: {len(self._all_tools)}")
@@ -398,7 +458,18 @@ class Agent:
             })
 
             for tc in response.tool_calls:
+                t_start = time.time()
                 result = self._execute_tool(tc)
+                duration = (time.time() - t_start) * 1000
+
+                # Audit the tool call
+                self.audit.log_tool_call(
+                    tool_name=tc.name,
+                    arguments=tc.arguments,
+                    result=result,
+                    duration_ms=duration,
+                )
+
                 use_anthropic = self.config.provider == "anthropic"
                 self.context.add_tool_result(tc.id, tc.name, result, use_anthropic_format=use_anthropic)
 
@@ -513,7 +584,7 @@ class Agent:
                     return f"No relevant memories found for: {query}"
                 return "Relevant memories:\n" + "\n".join(relevant[:10])
 
-            # -- File system tools --
+            # -- Shell command execution (with permissions + sandbox) --
             if name == "execute_command":
                 import subprocess
                 command = args.get("command", "").strip()
@@ -532,7 +603,27 @@ class Agent:
                         msg += f"\n(debug: raw arguments buffer was: {raw[:500]})"
                     return msg
 
-                # If the command matches dangerous patterns, request user approval
+                # 1. Check permissions (granular permission model)
+                approved, reason, perm_level = self.permissions.authorize_shell(command)
+                self.audit.log_permission_check("shell", command, perm_level.value, approved, reason)
+
+                if not approved:
+                    if perm_level == PermissionLevel.DENY:
+                        logger.warning("Command explicitly denied: %s", command)
+                        return (
+                            f"[SECURITY] Command denied by security policy: '{command[:200]}'\n"
+                            f"Reason: {reason}\n"
+                            f"This command is not allowed under any circumstances."
+                        )
+                    # PROMPT level denied by user
+                    logger.warning("User denied command: %s", command)
+                    return (
+                        f"[SECURITY] Command denied by user: '{command[:200]}'\n"
+                        f"Reason: {reason}\n"
+                        f"Please try a different approach that doesn't require this command."
+                    )
+
+                # 2. Also check legacy dangerous patterns (backward compat)
                 if self._is_dangerous_command(command):
                     approved, reason = self._request_command_approval(command)
                     if not approved:
@@ -544,11 +635,14 @@ class Agent:
                         )
                     logger.info("User approved dangerous command: %s", command)
 
-                # All commands (safe or approved dangerous) are executed here
+                # 3. Prepare command with sandbox (chdir to project root)
+                final_command = self.sandbox.prepare_command(command)
+
+                # 4. Execute
                 logger.info("Executing command: %s", command)
                 try:
                     proc = subprocess.run(
-                        command, shell=True, capture_output=True, text=True, timeout=timeout,
+                        final_command, shell=True, capture_output=True, text=True, timeout=timeout,
                     )
                     out = proc.stdout or ""
                     err = proc.stderr or ""
@@ -564,44 +658,159 @@ class Agent:
                     logger.error("Command error: %s", e)
                     return f"Command error: {e}"
 
+            # -- File read (with sandbox path resolution) --
             if name == "read_file":
                 from pathlib import Path
-                p = Path(args.get("path", ""))
-                if not p.exists():
-                    return f"File not found: {args['path']}"
+                raw_path = args.get("path", "")
                 try:
-                    return p.read_text(encoding="utf-8")[:8000]
+                    resolved = self.sandbox.safe_read_path(raw_path)
+                except PathTraversalError as e:
+                    self.audit.log_security_event("path_traversal_blocked", {
+                        "path": raw_path,
+                        "resolved": str(e.resolved),
+                        "root": e.root,
+                    })
+                    return f"[SECURITY] Path traversal blocked: {raw_path}"
                 except Exception as e:
+                    return f"Error resolving path: {e}"
+
+                if not resolved.exists():
+                    return f"File not found: {raw_path}"
+                try:
+                    content = resolved.read_text(encoding="utf-8")[:8000]
+                    self.audit.log_file_operation("read", str(resolved), len(content))
+                    return content
+                except Exception as e:
+                    self.audit.log_file_operation("read", str(resolved), 0, success=False, error=str(e))
                     return f"Error reading file: {e}"
 
+            # -- File write (via PatchTool with diff/approval) --
             if name == "write_file":
-                from pathlib import Path
-                p = Path(args.get("path", ""))
+                raw_path = args.get("path", "")
                 content = args.get("content", "")
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(content, encoding="utf-8")
-                logger.info("File written: %s (%d bytes)", args["path"], len(content))
-                return f"File written: {args['path']} ({len(content)} bytes)"
 
+                # Resolve path through sandbox
+                try:
+                    resolved = self.sandbox.resolve(raw_path, for_write=True)
+                except PathTraversalError as e:
+                    self.audit.log_security_event("path_traversal_blocked", {
+                        "path": raw_path,
+                        "resolved": str(e.resolved),
+                        "root": e.root,
+                    })
+                    return f"[SECURITY] Path traversal blocked: {raw_path}"
+                except Exception as e:
+                    return f"Error resolving path: {e}"
+
+                # Use PatchTool for diff-based approval
+                success, message = self.patch_tool.propose_write(str(resolved), content)
+                self.audit.log_file_operation(
+                    "write", str(resolved), len(content), success=success,
+                    error="" if success else message,
+                )
+                return message
+
+            # -- Apply diff (new tool, preferred for modifications) --
+            if name == "apply_diff":
+                raw_path = args.get("path", "")
+                content = args.get("content", "")
+                description = args.get("description", "")
+
+                # Resolve path through sandbox
+                try:
+                    resolved = self.sandbox.resolve(raw_path, for_write=True)
+                except PathTraversalError as e:
+                    self.audit.log_security_event("path_traversal_blocked", {
+                        "path": raw_path,
+                        "resolved": str(e.resolved),
+                        "root": e.root,
+                    })
+                    return f"[SECURITY] Path traversal blocked: {raw_path}"
+                except Exception as e:
+                    return f"Error resolving path: {e}"
+
+                # Compute diff for display
+                diff = compute_diff_from_path(str(resolved), content)
+
+                # Check permissions
+                approved, reason, perm_level = self.permissions.authorize_file_write(str(resolved))
+                self.audit.log_permission_check("filesystem", str(resolved), perm_level.value, approved, reason)
+
+                if not approved:
+                    return (
+                        f"[SECURITY] File write denied: '{raw_path}'\n"
+                        f"Reason: {reason}\n"
+                        f"Diff was:\n{diff[:2000]}"
+                    )
+
+                # Use PatchTool for the actual write
+                success, message = self.patch_tool.propose_write(str(resolved), content)
+                self.audit.log_file_operation(
+                    "apply_diff", str(resolved), len(content), success=success,
+                    error="" if success else message,
+                )
+                return message
+
+            # -- Append file (with sandbox + permissions) --
             if name == "append_file":
-                from pathlib import Path
-                p = Path(args.get("path", ""))
-                p.parent.mkdir(parents=True, exist_ok=True)
-                with p.open("a", encoding="utf-8") as f:
-                    f.write(args.get("content", ""))
-                logger.info("Content appended to: %s", args["path"])
-                return f"Content appended to: {args['path']}"
+                raw_path = args.get("path", "")
+                content = args.get("content", "")
 
+                # Resolve path through sandbox
+                try:
+                    resolved = self.sandbox.resolve(raw_path, for_write=True)
+                except PathTraversalError as e:
+                    self.audit.log_security_event("path_traversal_blocked", {
+                        "path": raw_path,
+                        "resolved": str(e.resolved),
+                        "root": e.root,
+                    })
+                    return f"[SECURITY] Path traversal blocked: {raw_path}"
+                except Exception as e:
+                    return f"Error resolving path: {e}"
+
+                # Check permissions
+                approved, reason, perm_level = self.permissions.authorize_file_write(str(resolved))
+                self.audit.log_permission_check("filesystem", str(resolved), perm_level.value, approved, reason)
+
+                if not approved:
+                    return (
+                        f"[SECURITY] File append denied: '{raw_path}'\n"
+                        f"Reason: {reason}"
+                    )
+
+                # Use PatchTool for append
+                success, message = self.patch_tool.propose_append(str(resolved), content)
+                self.audit.log_file_operation(
+                    "append", str(resolved), len(content), success=success,
+                    error="" if success else message,
+                )
+                return message
+
+            # -- List files (with sandbox) --
             if name == "list_files":
                 from pathlib import Path
-                p = Path(args.get("path", "."))
+                raw_path = args.get("path", ".")
                 recursive = args.get("recursive", False)
-                if not p.exists() or not p.is_dir():
-                    return f"Directory not found: {args['path']}"
+
+                try:
+                    resolved = self.sandbox.resolve(raw_path)
+                except PathTraversalError as e:
+                    self.audit.log_security_event("path_traversal_blocked", {
+                        "path": raw_path,
+                        "resolved": str(e.resolved),
+                        "root": e.root,
+                    })
+                    return f"[SECURITY] Path traversal blocked: {raw_path}"
+                except Exception as e:
+                    return f"Error resolving path: {e}"
+
+                if not resolved.exists() or not resolved.is_dir():
+                    return f"Directory not found: {raw_path}"
                 if recursive:
-                    files = [str(f.relative_to(p)) for f in p.rglob("*")]
+                    files = [str(f.relative_to(resolved)) for f in resolved.rglob("*")]
                 else:
-                    files = [str(f.name) for f in p.iterdir()]
+                    files = [str(f.name) for f in resolved.iterdir()]
                 return "\n".join(sorted(files)) if files else "(empty directory)"
 
             if name == "finish":
@@ -622,6 +831,7 @@ class Agent:
 
         except Exception as e:
             logger.error("Tool '%s' error: %s", name, e)
+            self.audit.log_error("tool_execution", str(e), {"tool": name, "args": args})
             return f"Tool '{name}' error: {e}"
 
     def reset_context(self) -> None:
@@ -631,3 +841,4 @@ class Agent:
     def shutdown(self) -> None:
         self.mcp.close_all()
         self.memory.save_all()
+        self.audit.close()

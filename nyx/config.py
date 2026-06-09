@@ -41,6 +41,36 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",
     "openai_base_url": "https://api.openai.com/v1/chat/completions",
     "anthropic_base_url": "https://api.anthropic.com/v1/messages",
+    # -- Security / sandbox --
+    "project_dir": "",
+    "sandbox": {
+        "enabled": True,
+        "auto_chdir": True,
+        "allow_paths": [],
+        "deny_paths": [],
+    },
+    # -- Permissions --
+    "permissions": {
+        "shell": {
+            "default": "allow",
+            "rules": [],
+        },
+        "filesystem": {
+            "default": "allow",
+            "rules": [],
+        },
+    },
+    # -- Audit trail --
+    "audit": {
+        "enabled": True,
+        "output_dir": "",
+        "max_file_size_mb": 50,
+    },
+    # -- Diff/patch tool --
+    "diff_tool": {
+        "require_approval": True,
+        "show_full_diff": True,
+    },
 }
 
 
@@ -83,6 +113,21 @@ class Config:
     openrouter_base_url: str = DEFAULT_CONFIG["openrouter_base_url"]
     openai_base_url: str = DEFAULT_CONFIG["openai_base_url"]
     anthropic_base_url: str = DEFAULT_CONFIG["anthropic_base_url"]
+    # -- Security / sandbox --
+    sandbox_enabled: bool = True
+    sandbox_auto_chdir: bool = True
+    sandbox_allow_paths: list[str] = field(default_factory=list)
+    sandbox_deny_paths: list[str] = field(default_factory=list)
+    # -- Permissions --
+    permissions_config: dict[str, Any] = field(default_factory=dict)
+    # -- Audit trail --
+    audit_enabled: bool = True
+    audit_output_dir: str = ""
+    audit_max_file_size_mb: int = 50
+    # -- Diff/patch tool --
+    diff_tool_require_approval: bool = True
+    diff_tool_show_full_diff: bool = True
+    # -- Raw --
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -131,11 +176,30 @@ class Config:
                 f"Set {provider.upper()}_API_KEY env var or add it to config.json."
             )
 
+        # 5. Flatten nested config sections into top-level fields
+        cls._flatten_nested(raw, "sandbox", ["enabled", "auto_chdir", "allow_paths", "deny_paths"])
+        cls._flatten_nested(raw, "permissions", ["config"])
+        cls._flatten_nested(raw, "audit", ["enabled", "output_dir", "max_file_size_mb"])
+        cls._flatten_nested(raw, "diff_tool", ["require_approval", "show_full_diff"])
+
         # Store a copy of raw config (not self-referencing)
         raw_copy = dict(raw)
         config = cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
         config.raw = raw_copy
         return config
+
+    @staticmethod
+    def _flatten_nested(raw: dict, prefix: str, keys: list[str]) -> None:
+        """Flatten nested config sections into top-level prefixed fields."""
+        section = raw.get(prefix, {})
+        if isinstance(section, dict):
+            for key in keys:
+                field_name = f"{prefix}_{key}"
+                if field_name not in raw and key in section:
+                    raw[field_name] = section[key]
+            # Keep the original nested config for reference
+            if prefix == "permissions":
+                raw["permissions_config"] = section
 
     def get_api_key(self) -> str:
         return getattr(self, f"{self.provider}_api_key", "")

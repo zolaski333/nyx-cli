@@ -155,10 +155,41 @@ def _make_rich_approval_handler(console) -> Callable[[str], tuple[bool, str]]:
     return handle_approval
 
 
+def _make_rich_file_approval_handler(console) -> Callable[[str, str, str], tuple[bool, str]]:
+    """Create an interactive approval handler for file operations using Rich."""
+    def handle_file_approval(path: str, summary: str, diff: str) -> tuple[bool, str]:
+        from rich.syntax import Syntax
+        from rich.panel import Panel
+        from rich.text import Text
+
+        console.print(f"\n[bold cyan]📝 FILE OPERATION[/bold cyan]")
+        console.print(f"  [bold]{summary}[/bold]")
+
+        if diff:
+            # Show diff with syntax highlighting
+            try:
+                syntax = Syntax(diff[:3000], "diff", theme="monokai", line_numbers=True)
+                console.print(Panel(syntax, title="[bold]Changes[/bold]", border_style="cyan"))
+            except Exception:
+                console.print(f"  [dim]{diff[:3000]}[/dim]")
+
+            if len(diff) > 3000:
+                console.print(f"  [dim](... diff truncated, {len(diff)} total chars)[/dim]")
+
+        response = console.input(f"  [bold]Apply this change?[/bold] (y/n): ").strip().lower()
+        if response == "y":
+            return True, ""
+        else:
+            reason = console.input(f"  [dim]Reason for denial:[/dim] ").strip()
+            return False, reason or "User denied the file change."
+    return handle_file_approval
+
+
 def run_rich_interactive(agent: Agent, config: Config) -> None:
     """Run the interactive REPL with Rich formatting."""
     console = get_console()
     agent.on_command_approval = _make_rich_approval_handler(console)
+    agent.on_file_approval = _make_rich_file_approval_handler(console)
     console.clear()
     console.print(welcome_panel(config, len(agent.tools)))
 

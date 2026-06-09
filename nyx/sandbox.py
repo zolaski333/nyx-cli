@@ -1,0 +1,204 @@
+"""
+Nyx — Sandbox with project root and secure path resolution.
+
+Provides:
+  - A project root directory that acts as a sandbox boundary.
+  - Secure path resolution that prevents path traversal attacks.
+  - Automatic chdir to the project root for shell commands.
+  - Path allow/deny lists for fine-grained filesystem access control.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Set
+
+logger = logging.getLogger(__name__)
+
+
+class PathTraversalError(ValueError):
+    """Raised when a path resolves outside the allowed sandbox."""
+
+    def __init__(self, path: str, resolved: str, root: str):
+        self.path = path
+        self.resolved = resolved
+        self.root = root
+        super().__init__(f"Path traversal blocked: '{path}' resolves to '{resolved}' outside project root '{root}'")
+
+
+class Sandbox:
+    """Project sandbox that enforces path boundaries and manages working directory."""
+
+    def __init__(
+        self,
+        project_root: str | Path | None = None,
+        allow_paths: list[str] | None = None,
+        deny_paths: list[str] | None = None,
+        auto_chdir: bool = True,
+    ):
+        self._root: Path | None = None
+        self._original_cwd: Path = self._safe_cwd()
+        self._auto_chdir = auto_chdir
+        self._allow_extra: list[Path] = []
+        self._deny_patterns: list[str] = deny_paths or []
+
+        if project_root:
+            self.set_root(project_root)
+
+        if allow_paths:
+            for p in allow_paths:
+                resolved = Path(p).resolve()
+                if resolved.exists() or resolved.parent.exists():
+                    self._allow_extra.append(resolved)
+
+    @staticmethod
+    def _safe_cwd() -> Path:
+        """Get the current working directory safely, even if it has been deleted."""
+        try:
+            return Path.cwd().resolve()
+        except FileNotFoundError:
+            # CWD was deleted; fall back to a reasonable default
+            return Path("/").resolve()
+
+    # ------------------------------------------------------------------
+    # Root management
+    # ------------------------------------------------------------------
+
+    @property
+    def root(self) -> Path | None:
+        return self._root
+
+    @property
+    def root_str(self) -> str:
+        return str(self._root) if self._root else ""
+
+    def set_root(self, path: str | Path) -> None:
+        """Set the project root directory. Creates it if it doesn't exist."""
+        p = Path(path).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        self._root = p
+        logger.info("Sandbox root set to: %s", p)
+
+        if self._auto_chdir:
+            os.chdir(p)
+            logger.info("Changed working directory to sandbox root: %s", p)
+
+    def chdir(self, path: str | Path | None = None) -> None:
+        """Change to a directory within the sandbox. If None, go to root."""
+        target = self._root if path is None else self.resolve(path)
+        os.chdir(target)
+        logger.debug("Changed directory to: %s", target)
+
+    def restore_cwd(self) -> None:
+        """Restore the original working directory."""
+        os.chdir(self._original_cwd)
+        logger.debug("Restored working directory to: %s", self._original_cwd)
+
+    # ------------------------------------------------------------------
+    # Path resolution
+    # ------------------------------------------------------------------
+
+    def resolve(self, path: str | Path, for_write: bool = False) -> Path:
+        """Resolve a path safely within the sandbox.
+
+        Args:
+            path: The path to resolve (absolute or relative).
+            for_write: If True, the path is being used for writing.
+
+        Returns:
+            Resolved absolute Path guaranteed to be within the sandbox.
+
+        Raises:
+            PathTraversalError: If the resolved path is outside the sandbox.
+        """
+        p = Path(path)
+
+        # If it's already absolute, resolve it directly
+        if p.is_absolute():
+            resolved = p.resolve()
+        else:
+            # Relative paths are resolved against the sandbox root
+            if self._root:
+                resolved = (self._root / p).resolve()
+            else:
+                resolved = p.resolve()
+
+        # If no sandbox root is set, allow everything
+        if self._root is None:
+            return resolved
+
+        # Check if the resolved path is within the sandbox root
+        try:
+            resolved.relative_to(self._root)
+            return resolved
+        except ValueError:
+            pass
+
+        # Check if the path is in the allowed extras list
+        for allowed in self._allow_extra:
+            try:
+                resolved.relative_to(allowed)
+                return resolved
+            except ValueError:
+                pass
+
+        # Path traversal detected
+        raise PathTraversalError(str(path), str(resolved), str(self._root))
+
+    def is_within_sandbox(self, path: str | Path) -> bool:
+        """Check if a path is within the sandbox without raising."""
+        try:
+            self.resolve(path)
+            return True
+        except PathTraversalError:
+            return False
+
+    def safe_read_path(self, path: str | Path) -> Path:
+        """Resolve a path for reading. Allows system paths outside sandbox."""
+        p = Path(path)
+        if p.is_absolute():
+            resolved = p.resolve()
+            # System paths are allowed for reading
+            if str(resolved).startswith("/etc/") or str(resolved).startswith("/usr/"):
+                return resolved
+        try:
+            return self.resolve(path)
+        except PathTraversalError:
+            # For reads, fall back to the raw absolute path if it exists
+            if p.is_absolute() and p.exists():
+                logger.warning("Read access to path outside sandbox: %s", p)
+                return p.resolve()
+            raise
+
+    # ------------------------------------------------------------------
+    # Command execution helpers
+    # ------------------------------------------------------------------
+
+    def prepare_command(self, command: str) -> str:
+        """Prepare a shell command for execution within the sandbox.
+
+        If auto_chdir is enabled and a root is set, wraps the command
+        to ensure it runs in the project root directory.
+        """
+        if self._auto_chdir and self._root:
+            # Use cd to ensure the command runs in the project root
+            # This handles cases where the shell might have a different cwd
+            return f"cd {shlex_quote(str(self._root))} && {command}"
+        return command
+
+    def to_dict(self) -> dict:
+        """Serialize sandbox config for display/logging."""
+        return {
+            "root": self.root_str,
+            "auto_chdir": self._auto_chdir,
+            "allow_paths": [str(p) for p in self._allow_extra],
+            "deny_patterns": list(self._deny_patterns),
+        }
+
+
+def shlex_quote(s: str) -> str:
+    """Simple shell quoting for a path string."""
+    # Replace single quotes with end-quote, escaped quote, begin-quote
+    escaped = s.replace("'", "'\\''")
+    return f"'{escaped}'"

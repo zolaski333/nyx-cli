@@ -139,9 +139,26 @@ def _make_ansi_approval_handler() -> Callable[[str], tuple[bool, str]]:
     return handle_approval
 
 
+def _make_ansi_file_approval_handler() -> Callable[[str, str, str], tuple[bool, str]]:
+    """Create an interactive approval handler for file operations (diff/patch)."""
+    def handle_file_approval(path: str, summary: str, diff: str) -> tuple[bool, str]:
+        print(f"\n{c('📝 FILE OPERATION', CYAN)} {summary}")
+        print(f"  {c(diff[:2000], DIM)}")
+        if len(diff) > 2000:
+            print(f"  {c('(... diff truncated, full diff has ' + str(len(diff)) + ' chars)', DIM)}")
+        response = input(f"  {c('Apply this change?', BOLD)} (y/n): ").strip().lower()
+        if response == "y":
+            return True, ""
+        else:
+            reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
+            return False, reason or "User denied the file change."
+    return handle_file_approval
+
+
 def run_ansi_interactive(agent: Agent, config: Config) -> None:
     """Fallback interactive REPL (no Rich)."""
     agent.on_command_approval = _make_ansi_approval_handler()
+    agent.on_file_approval = _make_ansi_file_approval_handler()
     print_welcome(config, len(agent.tools))
 
     while True:

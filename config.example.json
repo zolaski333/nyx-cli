@@ -22,5 +22,70 @@
   "web_search_provider": "duckduckgo",
   "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",
   "openai_base_url": "https://api.openai.com/v1/chat/completions",
-  "anthropic_base_url": "https://api.anthropic.com/v1/messages"
+  "anthropic_base_url": "https://api.anthropic.com/v1/messages",
+
+  "sandbox": {
+    "enabled": true,
+    "auto_chdir": true,
+    "allow_paths": [],
+    "deny_paths": []
+  },
+
+  "permissions": {
+    "shell": {
+      "default": "allow",
+      "rules": [
+        {"pattern": "rm -rf /*", "level": "deny", "description": "Recursive root deletion"},
+        {"pattern": "rm -rf /", "level": "deny", "description": "Root deletion"},
+        {"pattern": "rm *", "level": "prompt", "description": "File deletion"},
+        {"pattern": "sudo *", "level": "prompt", "description": "Superuser execution"},
+        {"pattern": "curl *", "level": "prompt", "description": "Remote request"},
+        {"pattern": "wget *", "level": "prompt", "description": "Remote download"},
+        {"pattern": "apt *", "level": "prompt", "description": "Package manager"},
+        {"pattern": "pip install *", "level": "prompt", "description": "Python package install"},
+        {"pattern": "npm install *", "level": "prompt", "description": "Node package install"},
+        {"pattern": "docker *", "level": "prompt", "description": "Docker operation"},
+        {"pattern": "git push *", "level": "prompt", "description": "Git push"},
+        {"pattern": "git reset *", "level": "prompt", "description": "Git reset"},
+        {"pattern": "chmod *", "level": "prompt", "description": "Permission change"},
+        {"pattern": "chown *", "level": "prompt", "description": "Ownership change"},
+        {"pattern": "dd *", "level": "prompt", "description": "Raw disk write"},
+        {"pattern": "mkfs*", "level": "prompt", "description": "Filesystem creation"},
+        {"pattern": "fdisk *", "level": "prompt", "description": "Disk partitioning"},
+        {"pattern": "mount *", "level": "prompt", "description": "Filesystem mount"},
+        {"pattern": "iptables *", "level": "prompt", "description": "Firewall change"},
+        {"pattern": "systemctl *", "level": "prompt", "description": "System service control"}
+      ]
+    },
+    "filesystem": {
+      "default": "allow",
+      "rules": [
+        {"pattern": "/etc/shadow", "level": "deny", "description": "Password file"},
+        {"pattern": "/etc/sudoers*", "level": "deny", "description": "Sudoers file"},
+        {"pattern": "/etc/passwd", "level": "deny", "description": "Password file"},
+        {"pattern": "/etc/*", "level": "prompt", "description": "System config file"},
+        {"pattern": "/usr/*", "level": "prompt", "description": "System file"},
+        {"pattern": "/bin/*", "level": "prompt", "description": "System binary"},
+        {"pattern": "/sbin/*", "level": "prompt", "description": "System binary"},
+        {"pattern": "/var/*", "level": "prompt", "description": "System data"},
+        {"pattern": "/dev/*", "level": "prompt", "description": "Device file"},
+        {"pattern": "/proc/*", "level": "prompt", "description": "Process file"},
+        {"pattern": "/sys/*", "level": "prompt", "description": "System file"},
+        {"pattern": "/boot/*", "level": "prompt", "description": "Boot file"},
+        {"pattern": "/root/*", "level": "prompt", "description": "Root home"},
+        {"pattern": "/home/*", "level": "prompt", "description": "User home"}
+      ]
+    }
+  },
+
+  "audit": {
+    "enabled": true,
+    "output_dir": "",
+    "max_file_size_mb": 50
+  },
+
+  "diff_tool": {
+    "require_approval": true,
+    "show_full_diff": true
+  }
 }
