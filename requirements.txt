@@ -1,0 +1,10 @@
+# Nyx — no external dependencies required!
+# The entire tool runs on Python 3.10+ standard library only.
+#
+# Optional dependencies:
+# rich>=13.0.0   # Beautiful TUI (install with: pip install nyx[tui])
+#
+# Development:
+# pytest>=7.0
+# mypy>=1.0
+# ruff>=0.1
