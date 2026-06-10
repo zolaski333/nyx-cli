@@ -48,6 +48,8 @@ class AuditEntry:
 # ---------------------------------------------------------------------------
 
 
+from queue import Queue
+
 class AuditTrail:
     """Thread-safe audit trail that writes structured JSON-lines to a file."""
 
@@ -65,10 +67,15 @@ class AuditTrail:
         self._file: Any = None  # Type: IO | None
         self._file_path: Path | None = None
         self._entry_count = 0
-        self._buffer: list[AuditEntry] = []
+        self._queue: Queue = Queue()
+        self._worker_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
 
         if output_dir:
             self._setup_file(output_dir)
+            if self._enabled:
+                self._worker_thread = threading.Thread(target=self._worker, daemon=True)
+                self._worker_thread.start()
 
     def _setup_file(self, output_dir: str | Path) -> None:
         """Set up the audit log file."""
@@ -84,19 +91,44 @@ class AuditTrail:
     def set_output_dir(self, output_dir: str | Path) -> None:
         """Set or change the output directory for audit logs."""
         with self._lock:
-            if self._file:
-                self._flush_buffer()
-                self._file.close()
-            self._setup_file(output_dir)
+            # Stop existing worker
+            if self._worker_thread:
+                self._stop_event.set()
+                try:
+                    self._queue.join()
+                    self._worker_thread.join(timeout=2.0)
+                except Exception:
+                    pass
+                self._stop_event.clear()
+                self._worker_thread = None
 
-    def _flush_buffer(self) -> None:
-        """Flush buffered entries to disk."""
-        if not self._file or not self._enabled:
-            return
-        for entry in self._buffer:
-            self._file.write(entry.to_json() + "\n")
-        self._buffer.clear()
-        self._file.flush()
+            if self._file:
+                self._file.close()
+            
+            self._setup_file(output_dir)
+            
+            if self._enabled:
+                self._worker_thread = threading.Thread(target=self._worker, daemon=True)
+                self._worker_thread.start()
+
+    def _worker(self) -> None:
+        """Background worker to write audit logs asynchronously."""
+        while not self._stop_event.is_set() or not self._queue.empty():
+            try:
+                entry = self._queue.get(timeout=0.1)
+            except Exception:
+                continue
+            try:
+                line = entry.to_json() + "\n"
+                with self._lock:
+                    if self._file:
+                        self._file.write(line)
+                        self._file.flush()
+                        self._check_rotation()
+            except Exception as e:
+                logger.error("Failed to write audit entry: %s", e)
+            finally:
+                self._queue.task_done()
 
     def _check_rotation(self) -> None:
         """Rotate the log file if it exceeds the maximum size."""
@@ -119,23 +151,28 @@ class AuditTrail:
             return
 
         with self._lock:
-            self._buffer.append(entry)
             self._entry_count += 1
-
-            # Flush periodically (every 10 entries or immediately for security events)
-            if entry.level == "security" or len(self._buffer) >= 10:
-                self._flush_buffer()
-                self._check_rotation()
+        
+        self._queue.put(entry)
 
     def flush(self) -> None:
         """Force-flush all buffered entries to disk."""
-        with self._lock:
-            self._flush_buffer()
+        if self._enabled:
+            try:
+                self._queue.join()
+            except Exception:
+                pass
 
     def close(self) -> None:
         """Close the audit log file."""
+        self._stop_event.set()
+        if self._worker_thread:
+            try:
+                self._queue.join()
+                self._worker_thread.join(timeout=2.0)
+            except Exception:
+                pass
         with self._lock:
-            self._flush_buffer()
             if self._file:
                 self._file.close()
                 self._file = None

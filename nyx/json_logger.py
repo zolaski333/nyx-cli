@@ -92,6 +92,8 @@ class JSONLogEntry:
 # ---------------------------------------------------------------------------
 
 
+from queue import Queue
+
 class JSONLogger:
     """Optional structured JSON logger with session tracking.
 
@@ -114,6 +116,9 @@ class JSONLogger:
         self._lock = threading.Lock()
         self._file: Any = None
         self._file_path: Path | None = None
+        self._queue: Queue = Queue()
+        self._worker_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
 
         # Cumulative session stats
         self.total_input_tokens: int = 0
@@ -127,6 +132,8 @@ class JSONLogger:
             self._setup_file(output_path)
 
         if self._enabled:
+            self._worker_thread = threading.Thread(target=self._worker, daemon=True)
+            self._worker_thread.start()
             self._write_entry(JSONLogEntry(
                 timestamp=time.time(),
                 event_type="session_start",
@@ -142,17 +149,32 @@ class JSONLogger:
         self._file = path.open("a", encoding="utf-8")
         logger.info("JSON log initialized: %s", self._file_path)
 
+    def _worker(self) -> None:
+        """Background worker to write log entries to disk asynchronously."""
+        while not self._stop_event.is_set() or not self._queue.empty():
+            try:
+                entry = self._queue.get(timeout=0.1)
+            except Exception:
+                continue
+            try:
+                line = entry.to_json() + "\n"
+                with self._lock:
+                    if self._file:
+                        self._file.write(line)
+                        self._file.flush()
+            except Exception as e:
+                logger.error("Failed to write JSON log entry: %s", e)
+            finally:
+                self._queue.task_done()
+
     def _write_entry(self, entry: JSONLogEntry) -> None:
         """Write a log entry to all configured outputs."""
         if not self._enabled:
             return
-        with self._lock:
+        if self._log_to_stderr:
             line = entry.to_json() + "\n"
-            if self._file:
-                self._file.write(line)
-                self._file.flush()
-            if self._log_to_stderr:
-                print(line, file=sys.stderr, end="", flush=True)
+            print(line, file=sys.stderr, end="", flush=True)
+        self._queue.put(entry)
 
     # ------------------------------------------------------------------
     # Logging methods
@@ -308,6 +330,16 @@ class JSONLogger:
                 session_id=self._session_id,
                 data=self.get_session_summary(),
             ))
+        
+        # Stop worker thread and flush remaining logs
+        self._stop_event.set()
+        if self._worker_thread:
+            try:
+                self._queue.join()
+                self._worker_thread.join(timeout=2.0)
+            except Exception:
+                pass
+            
         with self._lock:
             if self._file:
                 self._file.close()
