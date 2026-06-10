@@ -80,10 +80,6 @@ class Sandbox:
         self._root = p
         logger.info("Sandbox root set to: %s", p)
 
-        if self._auto_chdir:
-            os.chdir(p)
-            logger.info("Changed working directory to sandbox root: %s", p)
-
     def chdir(self, path: str | Path | None = None) -> None:
         """Change to a directory within the sandbox. If None, go to root."""
         target = self._root if path is None else self.resolve(path)
@@ -92,8 +88,12 @@ class Sandbox:
 
     def restore_cwd(self) -> None:
         """Restore the original working directory."""
-        os.chdir(self._original_cwd)
-        logger.debug("Restored working directory to: %s", self._original_cwd)
+        try:
+            if self._original_cwd.exists():
+                os.chdir(self._original_cwd)
+                logger.debug("Restored working directory to: %s", self._original_cwd)
+        except OSError as e:
+            logger.debug("Could not restore working directory: %s", e)
 
     # ------------------------------------------------------------------
     # Path resolution
@@ -166,8 +166,10 @@ class Sandbox:
             return self.resolve(path)
         except PathTraversalError:
             # For reads, fall back to the raw absolute path if it exists
-            if p.is_absolute() and p.exists():
-                logger.warning("Read access to path outside sandbox: %s", p)
+            raw = str(path)
+            if p.is_absolute() or raw.startswith(("/", "\\")):
+                if p.exists():
+                    logger.warning("Read access to path outside sandbox: %s", p)
                 return p.resolve()
             raise
 
@@ -184,6 +186,8 @@ class Sandbox:
         if self._auto_chdir and self._root:
             # Use cd to ensure the command runs in the project root
             # This handles cases where the shell might have a different cwd
+            if os.name == "nt":
+                return f'cd /d "{str(self._root)}" && {command}'
             return f"cd {shlex_quote(str(self._root))} && {command}"
         return command
 

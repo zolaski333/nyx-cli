@@ -421,6 +421,7 @@ class Agent:
         memory_manager: MemoryManager | None = None,
         async_subagent_manager: AsyncSubagentManager | None = None,
         on_token: Callable[[str], None] | None = None,
+        on_event: Callable[[dict[str, Any]], None] | None = None,
         on_command_approval: Callable[[str], tuple[bool, str]] | None = None,
         on_file_approval: Callable[[str, str, str], tuple[bool, str]] | None = None,
     ) -> None:
@@ -435,6 +436,7 @@ class Agent:
             provider_factory=lambda: get_provider(config),
         )
         self.on_token = on_token
+        self.on_event = on_event
         self._on_command_approval = on_command_approval
         self._on_file_approval = on_file_approval
         self.context = AgentContext()
@@ -487,6 +489,22 @@ class Agent:
         # Collect all tools
         self._all_tools: list[ToolDefinition] = list(BUILTIN_TOOLS)
 
+    def _emit(self, event_type: str, **payload: Any) -> None:
+        """Emit a UI/logging event without coupling the agent to a renderer."""
+        if self.on_event:
+            self.on_event({"type": event_type, **payload})
+            return
+        if event_type == "tool_start":
+            target = payload.get("target", "")
+            suffix = f" ➔ {target}" if target else ""
+            print(f"🛠️  [Tool Call] {payload.get('name')}{suffix}", flush=True)
+        elif event_type == "tool_finish":
+            status = "Success" if payload.get("ok") else "Failure"
+            details = ", ".join(payload.get("details", []))
+            target = payload.get("target", "")
+            suffix = f" ➔ {target}" if target else ""
+            print(f"✓  [Tool {status}] {payload.get('name')}{suffix} ({details})", flush=True)
+
     # ------------------------------------------------------------------
     # Approval callback properties (keep PermissionManager in sync)
     # ------------------------------------------------------------------
@@ -538,7 +556,7 @@ class Agent:
         # MCP
         if self.config.mcp_servers:
             logger.info("Connecting MCP servers...")
-            print("\n🔌 Connecting MCP servers...")
+            self._emit("status", message="Connecting MCP servers...")
 
             # Wire up progress callback if available
             if self.json_logger and self.json_logger.enabled:
@@ -563,7 +581,7 @@ class Agent:
         skills_dir = self.config.skills_dir
         if skills_dir:
             logger.info("Loading skills from %s", skills_dir)
-            print("🧠 Loading skills...")
+            self._emit("status", message="Loading skills...")
             skills_found = self.skills.discover(skills_dir)
             if skills_found:
                 self._all_tools.extend(self.skills.get_tool_definitions())
@@ -600,10 +618,13 @@ class Agent:
         # -- Controlled tool subset for subagents --
         self._subagent_tools = self._get_subagent_tools()
         self.subagents.set_default_tools(self._subagent_tools)
+        self.subagents.set_tool_executor(self._execute_tool)
+        self.async_subagents.set_default_tools(self._subagent_tools)
+        self.async_subagents.set_tool_executor(self._execute_tool)
         logger.info("Subagent tools: %d (filtered from %d)", len(self._subagent_tools), len(self._all_tools))
 
         logger.info("Total tools available: %d", len(self._all_tools))
-        print(f"\n📦 Total tools available: {len(self._all_tools)}")
+        self._emit("setup_complete", tool_count=len(self._all_tools))
 
     def _inject_memory_summary(self) -> None:
         """Inject a summary of past conversations into the LLM context."""
@@ -705,13 +726,7 @@ class Agent:
 
             self.permissions.set_approval_callback(_selective_pm_callback)
 
-        # Print mode banner
-        mode_labels = {
-            "chat": "💬 Chat", "code": "💻 Code",
-            "architect": "🏛  Architect", "debug": "🐛 Debug",
-        }
-        aut_labels = {"ask": "🙋 Ask", "auto": "⚡ Auto", "yolo": "🔥 Yolo"}
-        print(f"  Mode: {mode_labels.get(mode, mode)}  |  Autonomy: {aut_labels.get(autonomy, autonomy)}")
+        self._emit("mode", mode=mode, autonomy=autonomy, max_depth=self.max_depth)
 
     def switch_mode(self, mode: str) -> str:
         """Switch the agent mode at runtime. Returns a status message."""
@@ -779,6 +794,63 @@ class Agent:
     @property
     def tools(self) -> list[ToolDefinition]:
         return self._all_tools
+
+    @staticmethod
+    def _tool_target(name: str, arguments: dict[str, Any]) -> str:
+        """Return a short human-readable target for a tool call."""
+        if name in ("read_file", "write_file", "apply_diff", "append_file", "rollback_file"):
+            return str(arguments.get("path", ""))
+        if name == "list_files":
+            return str(arguments.get("path", "."))
+        if name == "execute_command":
+            command = str(arguments.get("command", "")).strip()
+            return (command[:60] + "...") if len(command) > 60 else command
+        if name == "web_search":
+            return str(arguments.get("query", ""))
+        if name == "web_fetch":
+            return str(arguments.get("url", ""))
+        if name == "subagent_run":
+            return str(arguments.get("name", ""))
+        if name == "parallel_subagents":
+            tasks = arguments.get("tasks", [])
+            return f"{len(tasks)} tasks"
+        if name == "memory_save":
+            note = str(arguments.get("note", "")).strip()
+            return (note[:40] + "...") if len(note) > 40 else note
+        if name == "memory_recall":
+            return str(arguments.get("query", ""))
+        if name == "repo_map":
+            return str(arguments.get("path", ""))
+        if name == "search_code":
+            return str(arguments.get("pattern", ""))
+        if name == "run_tests":
+            return str(arguments.get("command", "") or "(default)")
+
+        for key in ("path", "file", "filepath", "filename", "uri", "url", "command", "query"):
+            if key in arguments:
+                value = str(arguments[key]).strip()
+                if value:
+                    return (value[:60] + "...") if len(value) > 60 else value
+        return ""
+
+    @staticmethod
+    def _tool_result_details(name: str, arguments: dict[str, Any], result: str, duration_ms: float) -> list[str]:
+        """Return compact facts about a completed tool call."""
+        details: list[str] = []
+        is_error = "error" in result.lower() or "[error]" in result.lower() or "denied" in result.lower()
+        if not is_error:
+            if name == "read_file":
+                details.append(f"{len(result.splitlines())} lines read")
+            elif name in ("write_file", "append_file"):
+                details.append(f"{len(str(arguments.get('content', '')).splitlines())} lines written")
+            elif name == "apply_diff":
+                details.append(f"{len(str(arguments.get('diff', '')).splitlines())} lines diff")
+            elif name == "execute_command" and result.strip() and result != "(no output)":
+                details.append(f"{len(result.splitlines())} lines output")
+
+        duration = f"{duration_ms / 1000:.2f}s" if duration_ms >= 1000 else f"{int(duration_ms)}ms"
+        details.append(f"took {duration}")
+        return details
 
     def run(self, user_input: str, on_token: Callable[[str], None] | None = None) -> str:
         """Process a user input through the agentic loop."""
@@ -849,59 +921,8 @@ class Agent:
 
             for tc in response.tool_calls:
                 t_start = time.time()
-                
-                # Format a friendly console display for tool call
-                target = ""
-                if tc.name in ("read_file", "write_file", "apply_diff", "append_file", "rollback_file"):
-                    target = tc.arguments.get("path", "")
-                elif tc.name == "list_files":
-                    target = tc.arguments.get("path", ".")
-                elif tc.name == "execute_command":
-                    cmd = tc.arguments.get("command", "").strip()
-                    target = (cmd[:60] + "...") if len(cmd) > 60 else cmd
-                elif tc.name == "web_search":
-                    target = tc.arguments.get("query", "")
-                elif tc.name == "web_fetch":
-                    target = tc.arguments.get("url", "")
-                elif tc.name == "subagent_run":
-                    target = tc.arguments.get("name", "")
-                elif tc.name == "parallel_subagents":
-                    tasks = tc.arguments.get("tasks", [])
-                    target = f"{len(tasks)} tasks"
-                elif tc.name == "memory_save":
-                    note = tc.arguments.get("note", "").strip()
-                    target = (note[:40] + "...") if len(note) > 40 else note
-                elif tc.name == "memory_recall":
-                    target = tc.arguments.get("query", "")
-                elif tc.name == "repo_map":
-                    target = tc.arguments.get("path", "")
-                elif tc.name == "search_code":
-                    target = tc.arguments.get("pattern", "")
-                elif tc.name == "run_tests":
-                    cmd = tc.arguments.get("command", "")
-                    target = cmd if cmd else "(default)"
-                else:
-                    # Generic fallback check for custom/MCP tools
-                    for key in ("path", "file", "filepath", "filename", "uri", "url", "command", "query"):
-                        if key in tc.arguments:
-                            val = str(tc.arguments[key]).strip()
-                            if val:
-                                target = (val[:60] + "...") if len(val) > 60 else val
-                                break
-
-                # ANSI styles locally to avoid circular dependencies
-                no_color = os.environ.get("NO_COLOR")
-                c_reset = "\033[0m"
-                c_yellow_dim = "\033[2m\033[93m"
-                c_cyan = "\033[96m"
-                c_green = "\033[92m"
-                c_red = "\033[91m"
-                
-                def color_text(txt: str, code: str) -> str:
-                    return f"{code}{txt}{c_reset}" if not no_color else txt
-
-                target_str = f" ➔ {color_text(target, c_cyan)}" if target else ""
-                print(f"🛠️  [{color_text('Tool Call', c_yellow_dim)}] {tc.name}{target_str}", flush=True)
+                target = self._tool_target(tc.name, tc.arguments)
+                self._emit("tool_start", name=tc.name, target=target, arguments=tc.arguments)
 
                 # Log tool call attempt
                 self.json_logger.log_tool_call(
@@ -910,36 +931,15 @@ class Agent:
                 )
                 result = self._execute_tool(tc)
                 duration = (time.time() - t_start) * 1000
-                
-                # Format friendly console display for tool result
-                duration_str = f"{duration/1000:.2f}s" if duration >= 1000 else f"{int(duration)}ms"
                 is_err = "error" in result.lower() or "[error]" in result.lower() or "denied" in result.lower()
-                status_icon = "❌" if is_err else "✓"
-                status_color = c_red if is_err else c_green
-                status_text = "Failure" if is_err else "Success"
-                
-                # Extract clean/useful details (e.g., number of lines)
-                detail_parts = []
-                if not is_err:
-                    if tc.name == "read_file":
-                        lines_count = len(result.splitlines())
-                        detail_parts.append(f"{lines_count} lines read")
-                    elif tc.name in ("write_file", "append_file"):
-                        content = tc.arguments.get("content", "")
-                        lines_count = len(content.splitlines())
-                        detail_parts.append(f"{lines_count} lines written")
-                    elif tc.name == "apply_diff":
-                        diff = tc.arguments.get("diff", "")
-                        lines_count = len(diff.splitlines())
-                        detail_parts.append(f"{lines_count} lines diff")
-                    elif tc.name == "execute_command":
-                        if result.strip() and result != "(no output)":
-                            lines_count = len(result.splitlines())
-                            detail_parts.append(f"{lines_count} lines output")
-                
-                detail_parts.append(f"took {duration_str}")
-                detail_str = ", ".join(detail_parts)
-                print(f"{status_icon}  [{color_text('Tool ' + status_text, status_color)}] {tc.name}{target_str} ({detail_str})", flush=True)
+                self._emit(
+                    "tool_finish",
+                    name=tc.name,
+                    target=target,
+                    ok=not is_err,
+                    details=self._tool_result_details(tc.name, tc.arguments, result, duration),
+                    duration_ms=duration,
+                )
 
                 # Log tool result
                 self.json_logger.log_tool_result(

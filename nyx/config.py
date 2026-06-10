@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
 EXAMPLE_CONFIG_PATH = PROJECT_DIR / "config.example.json"
+DEFAULT_PROJECT_CONFIG_PATH = Path.cwd() / ".nyx" / "config.json"
+DEFAULT_USER_CONFIG_PATH = Path.home() / ".config" / "nyx" / "config.json"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -261,25 +264,23 @@ class Config:
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Config":
         """Load configuration with priority: env vars > config.json > defaults."""
-        path = Path(path) if path else DEFAULT_CONFIG_PATH
-
         # 1. Start with defaults
-        raw: dict[str, Any] = dict(DEFAULT_CONFIG)
+        raw: dict[str, Any] = deepcopy(DEFAULT_CONFIG)
 
-        # 2. Overlay config.json (or config.example.json as fallback)
-        if not path.exists():
-            # Try config.example.json as a fallback
-            if EXAMPLE_CONFIG_PATH.exists():
-                logger.info("No config.json found, using config.example.json as template")
-                path = EXAMPLE_CONFIG_PATH
+        # 2. Overlay config files from least-specific to most-specific.
+        config_paths = cls._config_paths(path)
+        loaded_paths: list[Path] = []
+        for cfg_path in config_paths:
+            if cfg_path.exists():
+                with cfg_path.open("r", encoding="utf-8") as f:
+                    file_config = json.load(f)
+                raw = cls._deep_merge(raw, file_config)
+                loaded_paths.append(cfg_path)
 
-        if path.exists():
-            with path.open("r", encoding="utf-8") as f:
-                file_config = json.load(f)
-            raw.update(file_config)
-            logger.info("Loaded config from %s", path)
+        if loaded_paths:
+            logger.info("Loaded config from %s", ", ".join(str(p) for p in loaded_paths))
         else:
-            logger.info("No config file at %s, using defaults", path)
+            logger.info("No config file found, using defaults")
 
         # 3. Environment variables override (highest priority)
         env_map: dict[str, str] = {
@@ -319,6 +320,37 @@ class Config:
         config = cls(**{k: v for k, v in raw.items() if k in cls.__dataclass_fields__})
         config.raw = raw_copy
         return config
+
+    @staticmethod
+    def _config_paths(path: str | Path | None = None) -> list[Path]:
+        """Return config paths in merge order."""
+        if path:
+            return [Path(path)]
+        candidates = [
+            DEFAULT_CONFIG_PATH,
+            DEFAULT_USER_CONFIG_PATH,
+            Path.cwd() / ".nyx" / "config.json",
+            Path.cwd() / "config.json",
+        ]
+        seen: set[Path] = set()
+        ordered: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.expanduser()
+            if resolved not in seen:
+                ordered.append(resolved)
+                seen.add(resolved)
+        return ordered
+
+    @staticmethod
+    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        """Merge nested dictionaries without losing sibling defaults."""
+        merged = deepcopy(base)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = Config._deep_merge(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
 
     @staticmethod
     def _flatten_nested(raw: dict, prefix: str, keys: list[str]) -> None:

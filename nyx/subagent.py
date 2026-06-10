@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from nyx.config import Config
-from nyx.providers.base import BaseLLMProvider
+from nyx.providers.base import BaseLLMProvider, ToolCall
 from nyx.providers import get_provider
 
 
@@ -37,6 +37,7 @@ class Subagent:
         max_tokens: int = 2048,
         temperature: float = 0.5,
         tools: list | None = None,
+        tool_executor: Callable[[ToolCall], str] | None = None,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt or (
@@ -48,6 +49,7 @@ class Subagent:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self._tools = tools  # Controlled tool subset (None = no tools)
+        self._tool_executor = tool_executor
 
     def execute(
         self,
@@ -147,6 +149,9 @@ class Subagent:
 
         This is a simplified execution — subagents get read-only + controlled tools.
         """
+        if self._tool_executor:
+            return self._tool_executor(tc)
+
         import subprocess
         from pathlib import Path
 
@@ -305,6 +310,7 @@ class SubagentManager:
         self._subagents: dict[str, Subagent] = {}
         self._results: dict[str, list[SubagentResult]] = {}
         self._default_tools: list | None = None  # Controlled tool subset
+        self._tool_executor: Callable[[ToolCall], str] | None = None
         self._progress_callback: Callable[[str, int, int], None] | None = None
 
     def set_progress_callback(self, callback: Callable[[str, int, int], None] | None) -> None:
@@ -314,6 +320,12 @@ class SubagentManager:
     def set_default_tools(self, tools: list | None) -> None:
         """Set the default tool subset for all spawned subagents."""
         self._default_tools = tools
+
+    def set_tool_executor(self, executor: Callable[[ToolCall], str] | None) -> None:
+        """Set the shared tool executor used by spawned subagents."""
+        self._tool_executor = executor
+        for agent in self._subagents.values():
+            agent._tool_executor = executor
 
     def spawn(
         self,
@@ -345,6 +357,7 @@ class SubagentManager:
             max_tokens=max_tokens,
             temperature=temperature,
             tools=effective_tools,
+            tool_executor=self._tool_executor,
         )
         self._subagents[name] = agent
         return agent

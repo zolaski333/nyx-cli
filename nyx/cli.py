@@ -20,7 +20,11 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from nyx.config import Config, ConfigError
+from nyx.config import DEFAULT_CONFIG, DEFAULT_USER_CONFIG_PATH
 from nyx.providers import get_provider
 from nyx.mcp_client import MCPManager
 from nyx.skill_manager import SkillManager
@@ -700,9 +704,123 @@ def _run_json(agent: Agent, prompt: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _project_config_path(project_dir: str | None = None) -> Path:
+    root = Path(project_dir or os.getcwd())
+    return root / ".nyx" / "config.json"
+
+
+def _parse_config_value(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _set_nested(data: dict[str, Any], dotted_key: str, value: Any) -> None:
+    current = data
+    parts = [p for p in dotted_key.split(".") if p]
+    if not parts:
+        raise ValueError("Config key cannot be empty.")
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    current[parts[-1]] = value
+
+
+def _get_nested(data: dict[str, Any], dotted_key: str) -> Any:
+    current: Any = data
+    for part in [p for p in dotted_key.split(".") if p]:
+        if not isinstance(current, dict) or part not in current:
+            raise KeyError(dotted_key)
+        current = current[part]
+    return current
+
+
+def _load_config_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_config_file(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def _handle_config_command(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Manage Nyx configuration")
+    parser.add_argument("command", choices=["init", "config"])
+    parser.add_argument("action", nargs="?", choices=["list", "get", "set"], help="Config action")
+    parser.add_argument("key", nargs="?", help="Dot-separated config key")
+    parser.add_argument("value", nargs="?", help="Value for 'set' (JSON or string)")
+    parser.add_argument("--global", dest="use_global", action="store_true", help="Use the global user config")
+    parser.add_argument("--force", action="store_true", help="Overwrite an existing config during init")
+    args = parser.parse_args(argv)
+
+    path = DEFAULT_USER_CONFIG_PATH if args.use_global else _project_config_path()
+
+    if args.command == "init":
+        if path.exists() and not args.force:
+            print(f"Config already exists: {path}")
+            print("Use --force to overwrite it.")
+            return 1
+        initial = {
+            "provider": DEFAULT_CONFIG["provider"],
+            "model": DEFAULT_CONFIG["model"],
+            "stream": DEFAULT_CONFIG["stream"],
+            "max_tokens": DEFAULT_CONFIG["max_tokens"],
+            "temperature": DEFAULT_CONFIG["temperature"],
+            "skills_dir": DEFAULT_CONFIG["skills_dir"],
+            "web_search_enabled": DEFAULT_CONFIG["web_search_enabled"],
+            "agent": DEFAULT_CONFIG["agent"],
+            "sandbox": DEFAULT_CONFIG["sandbox"],
+            "permissions": DEFAULT_CONFIG["permissions"],
+            "audit": DEFAULT_CONFIG["audit"],
+            "diff_tool": DEFAULT_CONFIG["diff_tool"],
+        }
+        _write_config_file(path, initial)
+        print(f"Created config: {path}")
+        print("Set your API key via OPENROUTER_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY.")
+        return 0
+
+    if args.command == "config":
+        action = args.action or "list"
+        data = _load_config_file(path)
+        if action == "list":
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+            return 0
+        if action == "get":
+            if not args.key:
+                print("Error: config get requires a key", file=sys.stderr)
+                return 1
+            try:
+                value = _get_nested(data, args.key)
+            except KeyError:
+                print(f"Config key not found: {args.key}", file=sys.stderr)
+                return 1
+            print(json.dumps(value, ensure_ascii=False, indent=2) if isinstance(value, (dict, list)) else value)
+            return 0
+        if action == "set":
+            if not args.key or args.value is None:
+                print("Error: config set requires a key and value", file=sys.stderr)
+                return 1
+            _set_nested(data, args.key, _parse_config_value(args.value))
+            _write_config_file(path, data)
+            print(f"Updated {args.key} in {path}")
+            return 0
+
+    return 1
+
+
 def _setup_logging(verbose: bool = False) -> None:
     """Configure logging for the application."""
-    level = logging.DEBUG if verbose else logging.INFO
+    level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -711,7 +829,68 @@ def _setup_logging(verbose: bool = False) -> None:
     )
 
 
+def _make_cli_event_handler(use_rich: bool = False) -> Callable[[dict[str, Any]], None]:
+    """Render agent events without coupling Agent to terminal output."""
+    if use_rich and RICH_AVAILABLE:
+        from nyx.cli_rich import get_console
+
+        console = get_console()
+
+        def rich_handler(event: dict[str, Any]) -> None:
+            event_type = event.get("type", "")
+            if event_type == "status":
+                console.print(f"[dim]{event.get('message', '')}[/dim]")
+            elif event_type == "mode":
+                console.print(
+                    f"[dim]Mode:[/dim] [cyan]{event.get('mode')}[/cyan]  "
+                    f"[dim]Autonomy:[/dim] [yellow]{event.get('autonomy')}[/yellow]"
+                )
+            elif event_type == "setup_complete":
+                console.print(f"[dim]Tools loaded:[/dim] [green]{event.get('tool_count', 0)}[/green]")
+            elif event_type == "tool_start":
+                target = event.get("target", "")
+                suffix = f" [dim]->[/dim] [cyan]{target}[/cyan]" if target else ""
+                console.print(f"[dim]Tool[/dim] [yellow]{event.get('name')}[/yellow]{suffix}")
+            elif event_type == "tool_finish":
+                style = "green" if event.get("ok") else "red"
+                status = "ok" if event.get("ok") else "failed"
+                details = ", ".join(event.get("details", []))
+                console.print(f"[{style}]Tool {status}[/] [yellow]{event.get('name')}[/yellow] [dim]({details})[/dim]")
+
+        return rich_handler
+
+    def ansi_handler(event: dict[str, Any]) -> None:
+        event_type = event.get("type", "")
+        if event_type == "status":
+            print(c(str(event.get("message", "")), DIM))
+        elif event_type == "mode":
+            print(f"  {c('Mode:', DIM)} {event.get('mode')}  |  {c('Autonomy:', DIM)} {event.get('autonomy')}")
+        elif event_type == "setup_complete":
+            print(f"  {c('Tools loaded:', DIM)} {event.get('tool_count', 0)}")
+        elif event_type == "tool_start":
+            target = event.get("target", "")
+            suffix = f" -> {c(str(target), CYAN)}" if target else ""
+            print(f"{c('Tool', DIM)} {c(str(event.get('name')), YELLOW)}{suffix}", flush=True)
+        elif event_type == "tool_finish":
+            status = "ok" if event.get("ok") else "failed"
+            status_color = GREEN if event.get("ok") else RED
+            details = ", ".join(event.get("details", []))
+            print(f"{c('Tool ' + status, status_color)} {event.get('name')} ({details})", flush=True)
+
+    return ansi_handler
+
+
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+
+    if len(sys.argv) > 1 and sys.argv[1] in {"init", "config"}:
+        sys.exit(_handle_config_command(sys.argv[1:]))
+
     parser = argparse.ArgumentParser(
         description="Nyx — Zero-dependency agentic coding CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -823,6 +1002,10 @@ def main() -> None:
         memory_manager=memory,
     )
 
+    use_rich = RICH_AVAILABLE and not args.no_rich and not args.json
+    if not args.json:
+        agent.on_event = _make_cli_event_handler(use_rich=use_rich)
+
     # Setup connections
     agent.setup()
 
@@ -834,13 +1017,13 @@ def main() -> None:
         if args.json:
             _run_json(agent, args.prompt)
         elif args.prompt:
-            if RICH_AVAILABLE and not args.no_rich:
+            if use_rich:
                 from nyx.cli_rich import run_rich_single
                 run_rich_single(agent, args.prompt)
             else:
                 run_ansi_single(agent, args.prompt)
         else:
-            if RICH_AVAILABLE and not args.no_rich:
+            if use_rich:
                 from nyx.cli_rich import run_rich_interactive
                 run_rich_interactive(agent, config)
             else:

@@ -200,9 +200,9 @@ class MCPManager:
                 tools = session.connect()
                 self._sessions[name] = session
                 all_tools.extend(tools)
-                print(f"  ✓ MCP '{name}': {len(tools)} tool(s) loaded")
+                print(f"  ok MCP '{name}': {len(tools)} tool(s) loaded")
             except Exception as e:
-                print(f"  ✗ MCP '{name}': {e}")
+                print(f"  x MCP '{name}': {e}")
             if self._progress_callback:
                 self._progress_callback(f"MCP '{name}'", i + 1, total)
         self.tools = all_tools

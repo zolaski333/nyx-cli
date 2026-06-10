@@ -599,6 +599,12 @@ def _compute_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _safe_artifact_name(value: str | Path) -> str:
+    """Return a filesystem-safe name for rollback/history artifacts."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
+    return safe.strip("._") or "file"
+
+
 def _get_rollback_dir(project_dir: str | Path | None = None) -> Path:
     """Get the rollback directory, creating it if needed."""
     if project_dir:
@@ -638,7 +644,7 @@ def _save_rollback(filepath: str | Path, content: str, project_dir: str | Path |
     timestamp = time.time()
 
     # Create a unique backup filename
-    safe_name = str(p).replace("/", "_").replace("\\", "_").lstrip("._")
+    safe_name = _safe_artifact_name(p)
     backup_name = f"{timestamp:.0f}_{safe_name}_{checksum[:8]}.bak"
     backup_path = rollback_dir / backup_name
 
@@ -753,7 +759,7 @@ def save_patch_record(record: PatchRecord, project_dir: str | Path | None = None
     """
     patches_dir = _get_patches_dir(project_dir)
     timestamp = record.timestamp
-    safe_name = record.filepath.replace("/", "_").replace("\\", "_").lstrip("._")
+    safe_name = _safe_artifact_name(record.filepath)
     patch_filename = f"{timestamp:.0f}_{record.change_type.value}_{safe_name}.patch"
     patch_path = patches_dir / patch_filename
 
@@ -1264,7 +1270,7 @@ class PatchTool:
             (success: bool, message: str)
         """
         rollback_dir = _get_rollback_dir(self._project_dir)
-        safe_prefix = filepath.replace("/", "_").replace("\\", "_").lstrip("._")
+        safe_prefix = _safe_artifact_name(filepath)
 
         # Find the most recent backup for this file
         backups = sorted(

@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from nyx.subagent import Subagent, SubagentResult
 from nyx.config import Config
+from nyx.providers.base import ToolCall
 
 
 @dataclass
@@ -59,6 +60,19 @@ class AsyncSubagentManager:
         self._lock = threading.Lock()
         self._agents: dict[str, Subagent] = {}
         self._results: dict[str, list[SubagentResult]] = {}
+        self._default_tools: list | None = None
+        self._tool_executor: Callable[[ToolCall], str] | None = None
+
+    def set_default_tools(self, tools: list | None) -> None:
+        """Set the default tool subset for spawned subagents."""
+        self._default_tools = tools
+
+    def set_tool_executor(self, executor: Callable[[ToolCall], str] | None) -> None:
+        """Set the shared tool executor used by spawned subagents."""
+        self._tool_executor = executor
+        with self._lock:
+            for agent in self._agents.values():
+                agent._tool_executor = executor
 
     def spawn(
         self,
@@ -77,6 +91,8 @@ class AsyncSubagentManager:
                 config=self._config,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                tools=self._default_tools,
+                tool_executor=self._tool_executor,
             )
             self._agents[name] = agent
             return agent

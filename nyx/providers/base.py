@@ -144,9 +144,10 @@ class BaseLLMProvider(ABC):
         data = request.data
         headers = {k: v for k, v in request.headers.items()}
         method = request.method or ("POST" if data is not None else "GET")
+        is_localhost = url.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
 
         # Try to use optional httpx or urllib3 client if not running under a unit test mock
-        if not is_mocked:
+        if not is_mocked and not is_localhost:
             try:
                 import httpx
                 if self._httpx_client is None:

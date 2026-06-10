@@ -94,7 +94,7 @@ class SkillManager:
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
         except Exception as e:
-            print(f"  ✗ Skill '{mod_name}': load error — {e}")
+            print(f"  x Skill '{mod_name}': load error - {e}")
             return None
 
         # Validate required exports
@@ -104,10 +104,10 @@ class SkillManager:
         execute_fn = getattr(mod, "execute", None)
 
         if not description:
-            print(f"  ⚠ Skill '{name}': no description set, skipping.")
+            print(f"  ! Skill '{name}': no description set, skipping.")
             return None
         if not execute_fn or not callable(execute_fn):
-            print(f"  ⚠ Skill '{name}': missing callable 'execute(arguments)'.")
+            print(f"  ! Skill '{name}': missing callable 'execute(arguments)'.")
             return None
 
         skill = Skill(
@@ -118,7 +118,7 @@ class SkillManager:
             file_path=file_path,
             module=mod,
         )
-        print(f"  ✓ Skill '{name}' loaded")
+        print(f"  ok Skill '{name}' loaded")
         return skill
 
     def get_skill(self, name: str) -> Skill | None:

@@ -27,6 +27,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _python_executable() -> str:
+    """Return a shell-safe path to the current Python interpreter."""
+    exe = sys.executable or "python"
+    if " " in exe:
+        return f'"{exe}"'
+    return exe
+
+
+def _normalise_python_command(command: str) -> str:
+    """Make common Python command prefixes portable across platforms."""
+    stripped = command.lstrip()
+    prefix_len = len(command) - len(stripped)
+    prefix = command[:prefix_len]
+    for old in ("python3 ", "python "):
+        if stripped.startswith(old):
+            return prefix + _python_executable() + stripped[len(old) - 1:]
+    return command
+
+
 @dataclass
 class TestFailure:
     """A single test failure with location and message."""
@@ -89,31 +108,32 @@ def discover_test_commands(root: str | Path | None = None) -> list[str]:
     """
     root = Path(root).resolve() if root else Path.cwd().resolve()
     commands: list[str] = []
+    py = _python_executable()
 
     # 1. pyproject.toml with pytest config
     pyproject = root / "pyproject.toml"
     if pyproject.exists():
         content = pyproject.read_text(encoding="utf-8", errors="ignore")
         if "[tool.pytest" in content:
-            commands.append("python -m pytest -v --tb=short 2>&1")
-            commands.append("python -m pytest -v --tb=long 2>&1")
+            commands.append(f"{py} -m pytest -v --tb=short 2>&1")
+            commands.append(f"{py} -m pytest -v --tb=long 2>&1")
 
     # 2. setup.cfg with pytest
     setup_cfg = root / "setup.cfg"
     if setup_cfg.exists():
         content = setup_cfg.read_text(encoding="utf-8", errors="ignore")
         if "[tool:pytest]" in content or "[pytest]" in content:
-            commands.append("python -m pytest -v --tb=short 2>&1")
+            commands.append(f"{py} -m pytest -v --tb=short 2>&1")
 
     # 3. pytest.ini
     if (root / "pytest.ini").exists():
-        commands.append("python -m pytest -v --tb=short 2>&1")
+        commands.append(f"{py} -m pytest -v --tb=short 2>&1")
 
     # 4. Generic pytest (if pytest is available)
-    commands.append("python -m pytest -v --tb=short 2>&1")
+    commands.append(f"{py} -m pytest -v --tb=short 2>&1")
 
     # 5. unittest discovery
-    commands.append("python -m unittest discover -v 2>&1")
+    commands.append(f"{py} -m unittest discover -v 2>&1")
 
     # 6. npm test
     if (root / "package.json").exists():
@@ -178,6 +198,8 @@ def run_tests(
                 failures=[],
             )
         command = candidates[0]
+
+    command = _normalise_python_command(command)
 
     logger.info("Running tests: %s (in %s)", command, root)
 
