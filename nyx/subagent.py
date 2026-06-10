@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from nyx.config import Config
 from nyx.providers.base import BaseLLMProvider
@@ -36,6 +36,7 @@ class Subagent:
         config: Config | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.5,
+        tools: list | None = None,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt or (
@@ -46,6 +47,7 @@ class Subagent:
         self._config = config
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self._tools = tools  # Controlled tool subset (None = no tools)
 
     def execute(
         self,
@@ -53,7 +55,16 @@ class Subagent:
         context: str = "",
         tools: list | None = None,
     ) -> SubagentResult:
-        """Run the subagent with a given task."""
+        """Run the subagent with a given task.
+
+        Args:
+            task: The task description for the subagent.
+            context: Optional context to prepend.
+            tools: Optional tool list override. If None, uses self._tools.
+
+        Returns:
+            SubagentResult with the output or error.
+        """
         provider = self._provider
         if not provider and self._config:
             try:
@@ -74,12 +85,55 @@ class Subagent:
             messages.append({"role": "user", "content": f"Context:\n{context}"})
         messages.append({"role": "user", "content": task})
 
+        # Use provided tools, or instance tools, or none
+        effective_tools = tools if tools is not None else self._tools
+
         try:
             response = provider.chat(
                 messages=messages,
-                tools=tools or None,
+                tools=effective_tools or None,
                 stream=False,
             )
+
+            # Handle tool calls recursively (subagent can use its own tools)
+            if response.tool_calls and effective_tools:
+                output_parts: list[str] = []
+                for tc in response.tool_calls:
+                    # Execute the tool call
+                    tool_result = self._execute_tool_call(tc, effective_tools)
+                    output_parts.append(f"[Tool: {tc.name}] {tool_result}")
+                # After tool execution, get final response
+                messages.append({
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": [
+                        {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
+                        for tc in response.tool_calls
+                    ],
+                })
+                for tc in response.tool_calls:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc.name,
+                        "content": "[Tool executed]",
+                    })
+                final_response = provider.chat(
+                    messages=messages,
+                    tools=effective_tools or None,
+                    stream=False,
+                )
+                final_content = final_response.content or "\n".join(output_parts)
+                return SubagentResult(
+                    task=task,
+                    output=final_content,
+                    tokens_used=(
+                        response.usage.get("total_tokens", 0) if response.usage else 0
+                    ) + (
+                        final_response.usage.get("total_tokens", 0) if final_response.usage else 0
+                    ),
+                )
+
             return SubagentResult(
                 task=task,
                 output=response.content,
@@ -87,6 +141,111 @@ class Subagent:
             )
         except Exception as e:
             return SubagentResult(task=task, output="", error=str(e))
+
+    def _execute_tool_call(self, tc, tools: list) -> str:
+        """Execute a single tool call for the subagent.
+
+        This is a simplified execution — subagents get read-only + controlled tools.
+        """
+        import subprocess
+        from pathlib import Path
+
+        name = tc.name
+        args = tc.arguments
+
+        try:
+            if name == "read_file":
+                path = args.get("path", "")
+                p = Path(path)
+                if p.exists():
+                    return p.read_text(encoding="utf-8", errors="ignore")[:5000]
+                return f"File not found: {path}"
+
+            if name == "list_files":
+                path = args.get("path", ".")
+                recursive = args.get("recursive", False)
+                p = Path(path)
+                if not p.exists() or not p.is_dir():
+                    return f"Directory not found: {path}"
+                if recursive:
+                    files = [str(f) for f in p.rglob("*")]
+                else:
+                    files = [str(f.name) for f in p.iterdir()]
+                return "\n".join(sorted(files)) if files else "(empty directory)"
+
+            if name == "search_code":
+                from nyx.search_code import search_code as _sc
+                pattern = args.get("pattern", "")
+                if not pattern:
+                    return "No pattern provided."
+                root = Path(".").resolve()
+                result = _sc(pattern, root=root)
+                return result.formatted(max_results=20, context_lines=2)
+
+            if name == "repo_map":
+                from nyx.repo_map import build_repo_map
+                return build_repo_map()
+
+            if name == "web_search":
+                from nyx.web_search import search_web, format_search_results
+                query = args.get("query", "")
+                max_results = min(args.get("max_results", 5), 10)
+                results = search_web(query, "duckduckgo", max_results)
+                return format_search_results(results)
+
+            if name == "web_fetch":
+                from nyx.web_search import fetch_page
+                return fetch_page(args.get("url", ""))
+
+            if name == "memory_recall":
+                return "[Subagent] Memory recall not available in subagent context."
+
+            if name == "execute_command":
+                command = args.get("command", "").strip()
+                timeout = args.get("timeout", 30)
+                if not command:
+                    return "Empty command."
+                proc = subprocess.run(
+                    command, shell=True, capture_output=True, text=True, timeout=timeout,
+                )
+                out = proc.stdout or ""
+                err = proc.stderr or ""
+                if proc.returncode != 0:
+                    return f"Exit code: {proc.returncode}\nstdout:\n{out[:2000]}\nstderr:\n{err[:1000]}"
+                return out[:3000] or "(no output)"
+
+            if name == "write_file":
+                path = args.get("path", "")
+                content = args.get("content", "")
+                Path(path).write_text(content, encoding="utf-8")
+                return f"File written: {path}"
+
+            if name == "apply_diff":
+                path = args.get("path", "")
+                content = args.get("content", "")
+                Path(path).write_text(content, encoding="utf-8")
+                return f"File written: {path}"
+
+            if name == "append_file":
+                path = args.get("path", "")
+                content = args.get("content", "")
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(content)
+                return f"Content appended to: {path}"
+
+            if name == "run_tests":
+                from nyx.test_loop import run_tests as _rt
+                command = args.get("command", "")
+                result = _rt(command=command if command else None)
+                return result.summary
+
+            if name == "finish":
+                return "[Subagent task complete]"
+
+            return f"Unknown tool: {name}"
+
+        except Exception as e:
+            return f"Tool '{name}' error: {e}"
 
 
 class SubagentManager:
@@ -96,6 +255,16 @@ class SubagentManager:
         self._config = config
         self._subagents: dict[str, Subagent] = {}
         self._results: dict[str, list[SubagentResult]] = {}
+        self._default_tools: list | None = None  # Controlled tool subset
+        self._progress_callback: Callable[[str, int, int], None] | None = None
+
+    def set_progress_callback(self, callback: Callable[[str, int, int], None] | None) -> None:
+        """Set a callback for progress updates: (label, current, total)."""
+        self._progress_callback = callback
+
+    def set_default_tools(self, tools: list | None) -> None:
+        """Set the default tool subset for all spawned subagents."""
+        self._default_tools = tools
 
     def spawn(
         self,
@@ -103,16 +272,30 @@ class SubagentManager:
         system_prompt: str = "",
         max_tokens: int = 2048,
         temperature: float = 0.5,
+        tools: list | None = None,
     ) -> Subagent:
-        """Create a new subagent by name."""
+        """Create a new subagent by name.
+
+        Args:
+            name: Unique name for the subagent.
+            system_prompt: Custom system prompt.
+            max_tokens: Maximum tokens for responses.
+            temperature: LLM temperature.
+            tools: Optional tool subset. Falls back to default_tools if None.
+
+        Returns:
+            Subagent instance.
+        """
         if name in self._subagents:
             return self._subagents[name]
+        effective_tools = tools if tools is not None else self._default_tools
         agent = Subagent(
             name=name,
             system_prompt=system_prompt,
             config=self._config,
             max_tokens=max_tokens,
             temperature=temperature,
+            tools=effective_tools,
         )
         self._subagents[name] = agent
         return agent
@@ -125,7 +308,11 @@ class SubagentManager:
     ) -> SubagentResult:
         """Run a subagent (auto-spawn if needed)."""
         agent = self._subagents.get(name) or self.spawn(name)
+        if self._progress_callback:
+            self._progress_callback(name, 0, 1)
         result = agent.execute(task=task, context=context)
+        if self._progress_callback:
+            self._progress_callback(name, 1, 1)
         self._results.setdefault(name, []).append(result)
         return result
 

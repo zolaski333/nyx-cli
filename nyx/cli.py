@@ -6,16 +6,19 @@ Auto-detects Rich for a beautiful TUI if installed, falls back to basic ANSI.
 Usage:
     nyx                               # Interactive chat mode
     nyx -p "refactor this file"       # Single prompt mode
-    nyx --help                        # Show help
+    nyx --json                        # JSON output mode (CI/CD)
+    nyx --help                         # Show help
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from nyx.config import Config, ConfigError
 from nyx.providers import get_provider
@@ -81,12 +84,59 @@ def _make_ansi_on_token() -> Callable[[str], None]:
 
 
 # ---------------------------------------------------------------------------
+# ANSI fallback: progress bar
+# ---------------------------------------------------------------------------
+
+
+class ProgressBar:
+    """Simple ANSI progress bar for operations like MCP loading, subagents."""
+
+    def __init__(self, total: int = 0, label: str = "", width: int = 30):
+        self.total = total
+        self.label = label
+        self.width = width
+        self._current = 0
+        self._start_time = time.time()
+
+    def update(self, n: int = 1) -> None:
+        self._current += n
+        self._draw()
+
+    def set_total(self, total: int) -> None:
+        self.total = total
+
+    def _draw(self) -> None:
+        if not supports_color() or not sys.stdout.isatty():
+            return
+        frac = self._current / max(self.total, 1)
+        filled = int(self.width * frac)
+        bar = "█" * filled + "░" * (self.width - filled)
+        elapsed = time.time() - self._start_time
+        pct = int(frac * 100)
+        print(
+            f"\r  {c(self.label, DIM)} [{c(bar, CYAN)}] "
+            f"{c(f'{pct}%', BOLD)} "
+            f"{c(f'({self._current}/{self.total})', DIM)} "
+            f"{c(f'{elapsed:.1f}s', DIM)}",
+            end="",
+            flush=True,
+        )
+        if self._current >= self.total:
+            print()
+
+    def close(self) -> None:
+        if self._current < self.total:
+            self._current = self.total
+            self._draw()
+
+
+# ---------------------------------------------------------------------------
 # ANSI fallback: interactive REPL
 # ---------------------------------------------------------------------------
 
 WELCOME_BANNER = f"""
 {c('╔══════════════════════════════════════════════════════╗', HEADER)}
-{c('║', HEADER)}            {c('⚡ Nyx v0.2.0', BOLD)}              {c('║', HEADER)}
+{c('║', HEADER)}            {c('⚡ Nyx v0.2.1', BOLD)}              {c('║', HEADER)}
 {c('║', HEADER)}    {c('Zero-dependency agentic coding tool', DIM)}  {c('║', HEADER)}
 {c('╚══════════════════════════════════════════════════════╝', HEADER)}
 """
@@ -100,6 +150,7 @@ HELP_TEXT = f"""
   {c('/tools', CYAN)}        List all available tools
   {c('/memory', CYAN)}       Show memory status
   {c('/conversations', CYAN)} List saved conversations
+  {c('/switch <id>', CYAN)}  Switch to a saved conversation
   {c('/reset', CYAN)}        Reset agent (clear context + shutdown MCP)
   {c('/exit', CYAN)}         Exit the program
 """
@@ -115,13 +166,77 @@ def print_welcome(config: Config, tool_count: int) -> None:
     print(f"  {c('Ready!', GREEN)} Type your request or {c('/help', CYAN)} for commands.\n")
 
 
-def print_tools(agent: Agent) -> None:
-    print(f"\n{c('Available Tools:', BOLD)}")
+def print_tools(agent: Agent, page: int = 1, page_size: int = 10) -> None:
+    """Print tools with pagination."""
+    tools = agent.tools
+    total = len(tools)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
+
+    print(f"\n{c('Available Tools:', BOLD)}  {c(f'Page {page}/{total_pages}', DIM)}")
     print(f"  {c('─' * 50, DIM)}")
-    for t in agent.tools:
+    for t in tools[start:end]:
         desc = t.description[:80] + ("..." if len(t.description) > 80 else "")
         print(f"  {c(f'◈ {t.name}', CYAN)}")
         print(f"    {c(desc, DIM)}")
+    if total_pages > 1:
+        print(f"  {c(f'Page {page}/{total_pages} — use /tools {page+1} for next page', DIM)}")
+    print()
+
+
+def print_memory_paginated(agent: Agent, page: int = 1, page_size: int = 10) -> None:
+    """Show memory status with pagination for entries."""
+    conv = agent.memory.current
+    if not conv:
+        print(f"{c('No active conversation.', YELLOW)}")
+        return
+
+    print(f"\n{c('🧠 Memory:', BOLD)} {conv.title}")
+    print(f"  {c('Messages:', DIM)} {len(conv.entries)}  {c('Tokens:', DIM)} {conv.total_tokens}")
+    print(f"  {c('Summary:', DIM)} {conv.summary[:200] if conv.summary else 'None'}")
+
+    if conv.entries:
+        total = len(conv.entries)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * page_size
+        end = min(start + page_size, total)
+
+        print(f"\n  {c(f'Entries (Page {page}/{total_pages}):', BOLD)}")
+        for i in range(start, end):
+            entry = conv.entries[i]
+            preview = entry.content[:80].replace("\n", " ")
+            print(f"    [{i+1}] {c(entry.role+':', GREEN if entry.role=='user' else MAGENTA)} {c(preview, DIM)}")
+        if total_pages > 1:
+            print(f"  {c(f'Use /memory {page+1} for next page', DIM)}")
+    print()
+
+
+def print_conversations_paginated(agent: Agent, page: int = 1, page_size: int = 10) -> None:
+    """List conversations with pagination."""
+    convs = agent.memory.list_conversations()
+    if not convs:
+        print(f"{c('No saved conversations.', YELLOW)}")
+        return
+
+    total = len(convs)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
+
+    print(f"\n{c('📂 Conversations:', BOLD)}  {c(f'Page {page}/{total_pages}', DIM)}")
+    print(f"  {c('─' * 60, DIM)}")
+    for conv in convs[start:end]:
+        current_mark = " ← current" if conv["id"] == agent.memory.current.id else ""
+        print(f"  [{c(conv['id'][:8], CYAN)}] {c(conv['title'][:40], BOLD)} "
+              f"({conv['entry_count']} msgs){c(current_mark, GREEN)}")
+        if conv["summary"]:
+            print(f"       {c(conv['summary'][:60], DIM)}")
+    if total_pages > 1:
+        print(f"  {c(f'Page {page}/{total_pages} — use /conversations {page+1} for next page', DIM)}")
     print()
 
 
@@ -155,22 +270,129 @@ def _make_ansi_file_approval_handler() -> Callable[[str, str, str], tuple[bool, 
     return handle_file_approval
 
 
+# ---------------------------------------------------------------------------
+# REPL history
+# ---------------------------------------------------------------------------
+
+
+class REPLHistory:
+    """Simple file-backed REPL history with dedup and max length."""
+
+    def __init__(self, history_file: str | None = None, max_size: int = 1000):
+        self._max_size = max_size
+        self._entries: list[str] = []
+        self._path = Path(history_file) if history_file else Path.home() / ".nyx_history"
+        self._load()
+
+    def _load(self) -> None:
+        if self._path.exists():
+            try:
+                lines = self._path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                self._entries = [l for l in lines if l.strip()][-self._max_size:]
+            except OSError:
+                self._entries = []
+
+    def append(self, entry: str) -> None:
+        entry = entry.strip()
+        if not entry:
+            return
+        # Dedup: remove previous occurrence
+        if entry in self._entries:
+            self._entries.remove(entry)
+        self._entries.append(entry)
+        if len(self._entries) > self._max_size:
+            self._entries = self._entries[-self._max_size:]
+        self._save()
+
+    def _save(self) -> None:
+        try:
+            self._path.write_text("\n".join(self._entries) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    def search(self, prefix: str) -> list[str]:
+        """Return matching history entries (most recent first)."""
+        if not prefix:
+            return []
+        return [e for e in reversed(self._entries) if e.startswith(prefix)][:10]
+
+    def get(self, index: int) -> str | None:
+        if 0 <= index < len(self._entries):
+            return self._entries[index]
+        return None
+
+    @property
+    def entries(self) -> list[str]:
+        return list(self._entries)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+# ---------------------------------------------------------------------------
+# ANSI interactive REPL with history, autocompletion, pagination
+# ---------------------------------------------------------------------------
+
+
+def _get_paginated_arg(user_input: str, cmd: str) -> int:
+    """Extract page number from '/cmd N' input."""
+    rest = user_input[len(cmd):].strip()
+    try:
+        return int(rest.split()[0]) if rest else 1
+    except (ValueError, IndexError):
+        return 1
+
+
+def _autocomplete_commands(partial: str) -> list[str]:
+    """Return matching built-in commands for autocompletion."""
+    commands = [
+        "/help", "/model", "/clear", "/tools", "/memory",
+        "/conversations", "/switch", "/reset", "/exit", "/quit", "/q",
+    ]
+    if not partial:
+        return commands
+    return [cmd for cmd in commands if cmd.startswith(partial)]
+
+
+def _ansi_autocomplete(partial: str) -> str:
+    """Simple inline autocompletion: show matches and return completed or partial."""
+    if not partial.startswith("/"):
+        return partial
+    matches = _autocomplete_commands(partial)
+    if len(matches) == 1:
+        # Auto-complete with a space
+        return matches[0] + " "
+    elif len(matches) > 1:
+        common = os.path.commonprefix(matches)
+        if len(common) > len(partial):
+            return common
+        print(f"\n  {c('Suggestions:', DIM)} {'  '.join(c(m, CYAN) for m in matches)}")
+    return partial
+
+
 def run_ansi_interactive(agent: Agent, config: Config) -> None:
     """Fallback interactive REPL (no Rich)."""
     agent.on_command_approval = _make_ansi_approval_handler()
     agent.on_file_approval = _make_ansi_file_approval_handler()
+    history = REPLHistory()
     print_welcome(config, len(agent.tools))
 
     while True:
         try:
-            user_input = input(f"\n{c('You', USER_COLOR)}> ").strip()
+            raw_input = input(f"\n{c('You', USER_COLOR)}> ")
         except (EOFError, KeyboardInterrupt):
             print(f"\n{c('Bye! 👋', GREEN)}")
             agent.memory.save_all()
             break
 
+        # Tab-like autocompletion via double-tab (user presses Enter on empty after partial)
+        user_input = raw_input.strip()
+
         if not user_input:
             continue
+
+        # History: up-arrow recall not possible in basic input(), but we store history
+        history.append(user_input)
 
         # Built-in commands
         if user_input in {"/exit", "/quit", "/q"}:
@@ -197,27 +419,41 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
             agent.provider = get_provider(config)
             print(f"{c('Model changed:', BOLD)} {config.model}")
             continue
-        if user_input == "/tools":
-            print_tools(agent)
+
+        # Paginated commands
+        if user_input.startswith("/tools"):
+            page = _get_paginated_arg(user_input, "/tools")
+            print_tools(agent, page=page)
             continue
-        if user_input == "/memory":
-            conv = agent.memory.current
-            if conv:
-                print(f"{c('Memory:', BOLD)}")
-                print(f"  Title: {conv.title}")
-                print(f"  Messages: {len(conv.entries)}")
-                print(f"  Total tokens: {conv.total_tokens}")
-                print(f"  Summary: {conv.summary[:200] if conv.summary else 'None'}")
+
+        if user_input.startswith("/memory"):
+            page = _get_paginated_arg(user_input, "/memory")
+            print_memory_paginated(agent, page=page)
+            continue
+
+        if user_input.startswith("/conversations"):
+            page = _get_paginated_arg(user_input, "/conversations")
+            print_conversations_paginated(agent, page=page)
+            continue
+
+        # Switch conversation
+        if user_input.startswith("/switch "):
+            conv_id = user_input[8:].strip()
+            if agent.memory.switch_to(conv_id):
+                conv = agent.memory.current
+                print(f"{c('Switched to conversation:', GREEN)} {conv.title if conv else conv_id}")
             else:
-                print(f"{c('No active conversation.', YELLOW)}")
-            continue
-        if user_input == "/conversations":
-            convs = agent.memory.list_conversations()
-            if not convs:
-                print(f"{c('No saved conversations.', YELLOW)}")
-                continue
-            for c in convs[:10]:
-                print(f"  [{c['id'][:8]}] {c['title'][:40]} ({c['entry_count']} msgs)")
+                # Try partial match
+                matches = [c for c in agent.memory.conversations.values() if c.id.startswith(conv_id)]
+                if len(matches) == 1:
+                    agent.memory.switch_to(matches[0].id)
+                    print(f"{c('Switched to conversation:', GREEN)} {matches[0].title}")
+                elif len(matches) > 1:
+                    print(f"{c('Multiple matches — use full ID:', YELLOW)}")
+                    for m in matches:
+                        print(f"  [{c(m.id, CYAN)}] {m.title}")
+                else:
+                    print(f"{c(f'Conversation not found: {conv_id}', YELLOW)}")
             continue
 
         # Agent execution
@@ -249,6 +485,39 @@ def run_ansi_single(agent: Agent, prompt: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# JSON output mode (CI/CD)
+# ---------------------------------------------------------------------------
+
+
+def _run_json(agent: Agent, prompt: str) -> None:
+    """Run in JSON mode — output structured JSON for CI/CD pipelines."""
+    start = time.time()
+
+    try:
+        result = agent.run(prompt, on_token=None)
+        output = {
+            "status": "success",
+            "prompt": prompt,
+            "result": result,
+            "duration_seconds": round(time.time() - start, 2),
+            "session_id": agent.json_logger.session_id if agent.json_logger else "",
+            "cost": round(agent.json_logger.total_cost, 6) if agent.json_logger else 0.0,
+            "llm_calls": agent.json_logger.total_llm_calls if agent.json_logger else 0,
+            "tool_calls": agent.json_logger.total_tool_calls if agent.json_logger else 0,
+        }
+    except Exception as e:
+        output = {
+            "status": "error",
+            "prompt": prompt,
+            "error": str(e),
+            "duration_seconds": round(time.time() - start, 2),
+        }
+
+    print(json.dumps(output, ensure_ascii=False, indent=2))
+    agent.shutdown()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -272,6 +541,7 @@ def main() -> None:
             "Examples:\n"
             "  nyx                               Interactive mode\n"
             "  nyx -p 'list all files'           Single prompt\n"
+            "  nyx --json -p 'list all files'    JSON output (CI/CD)\n"
             "  nyx --config ./myconf.json        Custom config\n"
             "  nyx --dir /path/to/project        Set working directory\n"
         ),
@@ -286,12 +556,32 @@ def main() -> None:
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
     parser.add_argument("--no-rich", action="store_true", help="Force basic CLI even if Rich is installed")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
+    parser.add_argument("--json", action="store_true", help="JSON output mode for CI/CD pipelines (requires --prompt)")
 
     args = parser.parse_args()
     _setup_logging(args.verbose)
 
     if args.no_color:
         os.environ["NO_COLOR"] = "1"
+
+    # Pipe mode: read stdin when not a TTY AND in single-prompt mode
+    piped_data = ""
+    if args.prompt and not sys.stdin.isatty():
+        try:
+            piped_data = sys.stdin.read()
+        except OSError:
+            pass
+
+    if piped_data and args.prompt:
+        # Prepend piped content to the given prompt
+        args.prompt = f"Context from stdin:\n```\n{piped_data}\n```\n\nTask: {args.prompt}"
+        if not args.json:
+            print(f"{c('📥 Pipe mode: ' + str(len(piped_data)) + ' chars from stdin', DIM)}", file=sys.stderr)
+
+    # Validate --json requires --prompt
+    if args.json and not args.prompt:
+        print("Error: --json mode requires --prompt/-p", file=sys.stderr)
+        sys.exit(1)
 
     # Load config
     try:
@@ -311,7 +601,11 @@ def main() -> None:
         config.project_dir = args.dir or args.project
     else:
         # Default to current working directory
-        config.project_dir = os.getcwd()
+        try:
+            config.project_dir = os.getcwd()
+        except FileNotFoundError:
+            # CWD was deleted (e.g. by a previous test); fall back to script dir
+            config.project_dir = os.path.dirname(os.path.abspath(__file__))
 
     logger.info("Starting Nyx with provider=%s model=%s", config.provider, config.model)
 
@@ -339,7 +633,9 @@ def main() -> None:
         agent.context.add("system", config.system_prompt)
 
     try:
-        if args.prompt:
+        if args.json:
+            _run_json(agent, args.prompt)
+        elif args.prompt:
             if RICH_AVAILABLE and not args.no_rich:
                 from nyx.cli_rich import run_rich_single
                 run_rich_single(agent, args.prompt)

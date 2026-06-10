@@ -76,7 +76,7 @@ class AnthropicProvider(BaseLLMProvider):
         }
 
     def _non_stream_response(self, request: urllib.request.Request, timeout: int) -> LLMResponse:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
+        with self._resilient_urlopen(request, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         if body.get("type") == "error":
             raise RuntimeError(body["error"]["message"])
@@ -112,7 +112,7 @@ class AnthropicProvider(BaseLLMProvider):
         tool_calls_buffer: dict[str, ToolCall] = {}
         finish_reason = "end_turn"
 
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
+        with self._resilient_urlopen(request, timeout=timeout) as resp:
             for raw_line in resp:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data: "):

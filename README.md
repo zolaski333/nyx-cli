@@ -150,6 +150,55 @@ nyx --dir /autre/chemin
 nyx --project /autre/chemin
 ```
 
+### Pipe mode (stdin)
+
+Nyx supports pipe mode — when stdin is not a TTY (e.g., piped data), the piped content is
+automatically prepended to your prompt context:
+
+```bash
+# Pipe file content as context
+cat main.py | nyx -p "review this code for bugs"
+
+# Pipe command output
+git diff | nyx -p "summarise these changes"
+
+# Multi-line pipe
+curl -s https://api.example.com/data.json | nyx -p "explain this JSON structure"
+```
+
+> **Note**: Pipe mode works by reading all stdin into a context preamble. The `-p` flag is still
+> required to specify the actual prompt. If no `-p` is given with piped input, Nyx falls back
+> to interactive mode.
+
+### 🚀 CI/CD Integration (`--json`)
+
+For CI/CD pipelines, use `--json` mode to get structured output:
+
+```bash
+# JSON output with cost tracking, session ID, timing
+nyx --json -p "lint all Python files"
+
+# Example output:
+# {
+#   "status": "success",
+#   "prompt": "lint all Python files",
+#   "result": "Fixed 3 issues...",
+#   "duration_seconds": 12.45,
+#   "session_id": "a1b2c3d4e5f6",
+#   "cost": 0.0023,
+#   "llm_calls": 2,
+#   "tool_calls": 5
+# }
+```
+
+The `--json` flag requires `--prompt`/`-p` and outputs newline-delimited JSON with:
+- `status`: `"success"` or `"error"`
+- `result` / `error`: The output or error message
+- `duration_seconds`: Wall-clock time
+- `session_id`: Unique session identifier
+- `cost`: Estimated USD cost
+- `llm_calls`, `tool_calls`: Usage statistics
+
 ### Flags
 
 | Flag | Description |
@@ -160,9 +209,11 @@ nyx --project /autre/chemin
 | `--provider` | Override provider (`openrouter`, `openai`, `anthropic`) |
 | `-d, --dir` | Working directory for the AI (default: current dir) |
 | `--project` | Alias for `--dir` |
+| `--json` | JSON output mode for CI/CD (requires `--prompt`) |
 | `--no-stream` | Disable streaming output |
 | `--no-color` | Disable ANSI color output |
 | `--no-rich` | Force basic CLI even if Rich is installed |
+| `-v, --verbose` | Enable verbose/debug logging |
 
 ### Interactive Commands
 
@@ -172,11 +223,15 @@ nyx --project /autre/chemin
 | `/model` | Show current model |
 | `/model <name>` | Change model on the fly |
 | `/clear` | Clear conversation context |
-| `/tools` | List all available tools |
-| `/memory` | Show memory status |
-| `/conversations` | List saved conversations |
+| `/tools [N]` | List all available tools (paginated, optional page N) |
+| `/memory [N]` | Show memory status with paginated entries |
+| `/conversations [N]` | List saved conversations (paginated, optional page N) |
+| `/switch <id>` | Switch to a saved conversation (supports partial ID) |
 | `/reset` | Reset agent + disconnect MCP |
 | `/exit` | Quit |
+
+> **Tip**: `/tools 2`, `/memory 3`, `/conversations 2` navigate paginated views.
+> `/switch abc` switches to conversation with ID starting with "abc".
 
 ---
 

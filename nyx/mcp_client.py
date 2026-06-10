@@ -180,13 +180,21 @@ class MCPManager:
     def __init__(self) -> None:
         self._sessions: dict[str, MCPSession] = {}
         self.tools: list[MCPTool] = []
+        self._progress_callback: Callable[[str, int, int], None] | None = None
+
+    def set_progress_callback(self, callback: Callable[[str, int, int], None] | None) -> None:
+        """Set a callback for progress updates: (label, current, total)."""
+        self._progress_callback = callback
 
     def connect_all(self, servers_config: dict[str, dict[str, Any]]) -> list[MCPTool]:
         """Connect to all configured MCP servers and collect their tools."""
         all_tools: list[MCPTool] = []
-        for name, cfg in servers_config.items():
-            if not cfg.get("enabled", True):
-                continue
+        enabled_servers = [(name, cfg) for name, cfg in servers_config.items() if cfg.get("enabled", True)]
+        total = len(enabled_servers)
+
+        for i, (name, cfg) in enumerate(enabled_servers):
+            if self._progress_callback:
+                self._progress_callback(f"MCP '{name}'", i, total)
             try:
                 session = MCPSession(name, cfg)
                 tools = session.connect()
@@ -195,6 +203,8 @@ class MCPManager:
                 print(f"  ✓ MCP '{name}': {len(tools)} tool(s) loaded")
             except Exception as e:
                 print(f"  ✗ MCP '{name}': {e}")
+            if self._progress_callback:
+                self._progress_callback(f"MCP '{name}'", i + 1, total)
         self.tools = all_tools
         return all_tools
 
@@ -211,6 +221,7 @@ class MCPManager:
 
     def close_all(self) -> None:
         for session in self._sessions.values():
-            session.close()
+            if session is not None:
+                session.close()
         self._sessions.clear()
         self.tools.clear()

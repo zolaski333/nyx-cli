@@ -3,14 +3,17 @@ Nyx — the core agentic loop.
 
 Orchestrates: LLM calls → tool execution → context management.
 Supports: skills, MCP tools, web search, subagents (sync + parallel),
-          persistent memory, summarisation, code execution.
+          persistent memory, summarisation, code execution,
+          repo mapping, code search, test loop, auto-correction.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from nyx.config import Config
@@ -25,7 +28,12 @@ from nyx.web_search import search_web, format_search_results, fetch_page
 from nyx.permissions import PermissionManager, PermissionLevel
 from nyx.sandbox import Sandbox, PathTraversalError
 from nyx.audit import AuditTrail
+from nyx.json_logger import JSONLogger
 from nyx.diff_tool import PatchTool, compute_diff, compute_diff_from_path
+from nyx.repo_map import build_repo_map, build_repo_map_short
+from nyx.search_code import search_code as _search_code
+from nyx.test_loop import run_tests as _run_tests
+from nyx.test_loop import auto_correct_loop, format_failures_for_llm, TestFailure
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +210,69 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
             "required": ["summary", "result"],
         },
     ),
+    # ------------------------------------------------------------------
+    # Repo map tool
+    # ------------------------------------------------------------------
+    ToolDefinition(
+        name="repo_map",
+        description="Get a structured overview of the current repository: directory tree, important files, git status (branch, changes, last commit), and available test suites. Use this at the start of a task to understand the project layout.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Optional path to the repository root (default: current directory)"},
+                "short": {"type": "boolean", "description": "If true, return a one-line summary instead of full map", "default": False},
+            },
+            "required": [],
+        },
+    ),
+    # ------------------------------------------------------------------
+    # Code search tool
+    # ------------------------------------------------------------------
+    ToolDefinition(
+        name="search_code",
+        description="Search the codebase using ripgrep (or grep fallback). Returns matching lines with surrounding context. Use for finding function definitions, variable references, patterns, or any code navigation.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "The search pattern (plain text or regex)"},
+                "file_pattern": {"type": "string", "description": "Optional glob filter (e.g., '*.py', '*.rs', '*.ts')"},
+                "max_results": {"type": "integer", "description": "Maximum number of matches to return (default: 30)", "default": 30},
+                "context_lines": {"type": "integer", "description": "Lines of context before/after each match (default: 2)", "default": 2},
+                "case_sensitive": {"type": "boolean", "description": "Case-sensitive search (default: false)", "default": False},
+                "regex": {"type": "boolean", "description": "Treat pattern as regex (default: auto-detect)", "default": False},
+                "fixed_strings": {"type": "boolean", "description": "Treat pattern as literal text (default: false)", "default": False},
+            },
+            "required": ["pattern"],
+        },
+    ),
+    # ------------------------------------------------------------------
+    # Test tools
+    # ------------------------------------------------------------------
+    ToolDefinition(
+        name="run_tests",
+        description="Run the project's test suite and return structured results with parsed failures. Auto-discovers the test framework (pytest, unittest, npm, etc.).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Optional specific test command (e.g., 'pytest tests/test_agent.py -v'). If omitted, auto-discovers."},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 120)", "default": 120},
+            },
+            "required": [],
+        },
+    ),
+    ToolDefinition(
+        name="auto_correct_tests",
+        description="Run tests, parse failures, and automatically fix them using a subagent. Iterates up to max_iterations times until all tests pass. Use this to automatically fix broken tests.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "test_command": {"type": "string", "description": "Optional specific test command. If omitted, auto-discovers."},
+                "max_iterations": {"type": "integer", "description": "Maximum fix iterations (default: 5)", "default": 5},
+                "timeout": {"type": "integer", "description": "Timeout per test run in seconds (default: 120)", "default": 120},
+            },
+            "required": [],
+        },
+    ),
 ]
 
 
@@ -283,7 +354,6 @@ class Agent:
     @staticmethod
     def _is_dangerous_command(command: str) -> bool:
         """Check if a command matches dangerous patterns using word-boundary matching."""
-        import re
         cmd_lower = command.strip().lower()
 
         # Check dangerous operators (only when used as standalone tokens)
@@ -342,6 +412,9 @@ class Agent:
         self.call_depth = 0
         self.max_depth = 15
 
+        # Controlled tool subset for subagents (set after setup)
+        self._subagent_tools: list[ToolDefinition] = []
+
         # -- Security subsystems --
         # Permission manager
         self.permissions = PermissionManager(config.permissions_config if config.permissions_config else None)
@@ -363,6 +436,17 @@ class Agent:
             max_file_size_mb=config.audit_max_file_size_mb,
         )
 
+        # JSON logger (optional structured logging with session id, costs, etc.)
+        json_log_path = config.json_logging_output_path or (
+            config.project_dir + "/.nyx/nyx_log.ndjson" if config.project_dir else ""
+        )
+        self.json_logger = JSONLogger(
+            output_path=json_log_path if json_log_path and config.json_logging_enabled else None,
+            log_to_stderr=config.json_logging_log_to_stderr,
+            enabled=config.json_logging_enabled,
+            model=config.model,
+        )
+
         # Patch/diff tool
         self.patch_tool = PatchTool(approval_callback=self._file_approval_handler)
 
@@ -378,13 +462,30 @@ class Agent:
         return approved, reason
 
     def setup(self) -> None:
-        """Connect MCP servers and discover skills."""
+        """Connect MCP servers, discover skills, inject memory summary and repo map."""
         # MCP
         if self.config.mcp_servers:
             logger.info("Connecting MCP servers...")
             print("\n🔌 Connecting MCP servers...")
+
+            # Wire up progress callback if available
+            if self.json_logger and self.json_logger.enabled:
+                self.mcp.set_progress_callback(
+                    lambda label, cur, total: self.json_logger.log_event(
+                        "mcp_progress", {"server": label, "current": cur, "total": total}
+                    )
+                )
+
             self.mcp.connect_all(self.config.mcp_servers)
             self._all_tools.extend(self.mcp.get_tool_definitions())
+
+        # Wire up subagent progress callback
+        if self.json_logger and self.json_logger.enabled:
+            self.subagents.set_progress_callback(
+                lambda label, cur, total: self.json_logger.log_event(
+                    "subagent_progress", {"name": label, "current": cur, "total": total}
+                )
+            )
 
         # Skills
         skills_dir = self.config.skills_dir
@@ -407,8 +508,104 @@ class Agent:
                 "Use apply_diff for modifying existing files — it shows a diff and requires approval."
             ))
 
+        # -- Memory summary injection --
+        # Automatically inject a summary of past conversations into the LLM context
+        self._inject_memory_summary()
+
+        # -- Repo map injection --
+        # Automatically inject a short repo map for context
+        if self.config.project_dir:
+            try:
+                repo_summary = build_repo_map_short(self.config.project_dir)
+                self.context.add("system", f"[Repository context]\n{repo_summary}")
+                logger.info("Injected repo map: %s", repo_summary)
+            except Exception as e:
+                logger.debug("Could not build repo map: %s", e)
+
+        # -- Controlled tool subset for subagents --
+        self._subagent_tools = self._get_subagent_tools()
+        self.subagents.set_default_tools(self._subagent_tools)
+        logger.info("Subagent tools: %d (filtered from %d)", len(self._subagent_tools), len(self._all_tools))
+
         logger.info("Total tools available: %d", len(self._all_tools))
         print(f"\n📦 Total tools available: {len(self._all_tools)}")
+
+    def _inject_memory_summary(self) -> None:
+        """Inject a summary of past conversations into the LLM context."""
+        try:
+            convs = self.memory.list_conversations()
+            if not convs:
+                return
+
+            # Build a concise summary of past conversations
+            parts: list[str] = []
+            parts.append("[Memory: Past conversations]")
+
+            for conv in convs[:5]:  # Last 5 conversations
+                title = conv.get("title", "Untitled")
+                summary = conv.get("summary", "")
+                entry_count = conv.get("entry_count", 0)
+                if summary:
+                    parts.append(f"- {title} ({entry_count} msgs): {summary[:200]}")
+                else:
+                    parts.append(f"- {title} ({entry_count} msgs)")
+
+            # Also include saved notes
+            notes = self.memory._load_notes()
+            if notes:
+                parts.append(f"\n[Saved notes: {len(notes)}]")
+                for note in notes[-3:]:  # Last 3 notes
+                    parts.append(f"- {note['content'][:150]}")
+
+            if len(parts) > 1:
+                self.context.add("system", "\n".join(parts))
+                logger.info("Injected memory summary (%d conversations)", len(convs))
+        except Exception as e:
+            logger.debug("Could not inject memory summary: %s", e)
+
+    # ------------------------------------------------------------------
+    # Controlled tool subsets for subagents
+    # ------------------------------------------------------------------
+
+    SUBAGENT_TOOL_WHITELIST: set[str] = {
+        # Read-only tools (safe for subagents)
+        "read_file",
+        "list_files",
+        "search_code",
+        "repo_map",
+        "web_search",
+        "web_fetch",
+        "memory_recall",
+        # Write tools (subagents can propose changes)
+        "write_file",
+        "apply_diff",
+        "append_file",
+        # Execution (subagents can run safe commands)
+        "execute_command",
+        "run_tests",
+        # Meta
+        "finish",
+    }
+
+    SUBAGENT_TOOL_BLACKLIST: set[str] = {
+        # Prevent subagents from spawning their own subagents (infinite recursion)
+        "subagent_run",
+        "parallel_subagents",
+        "auto_correct_tests",
+        # Memory save should be controlled by main agent
+        "memory_save",
+    }
+
+    def _get_subagent_tools(self) -> list[ToolDefinition]:
+        """Return a filtered list of tools safe for subagent use.
+
+        Subagents get a read-only subset plus controlled write/execution tools.
+        They cannot spawn sub-subagents or auto-correct tests.
+        """
+        return [
+            t for t in self._all_tools
+            if t.name in self.SUBAGENT_TOOL_WHITELIST
+        ]
 
     @property
     def tools(self) -> list[ToolDefinition]:
@@ -430,6 +627,8 @@ class Agent:
             return "I've reached the maximum number of reasoning steps. Please ask me to continue or refine your request."
 
         logger.debug("LLM call (depth=%d, messages=%d)", self.call_depth, len(self.context.messages))
+        llm_start = time.time()
+        llm_error = ""
         try:
             response = self.provider.chat(
                 messages=self.context.messages,
@@ -440,7 +639,23 @@ class Agent:
         except Exception as e:
             self.call_depth -= 1
             logger.error("LLM call failed: %s", e)
+            llm_error = str(e)
+            # Log the failed LLM call
+            self.json_logger.log_llm_call(
+                input_tokens=0,
+                output_tokens=0,
+                duration_ms=(time.time() - llm_start) * 1000,
+                error=llm_error,
+            )
             return f"Error calling LLM: {e}"
+
+        # Log successful LLM call
+        usage = response.usage or {}
+        self.json_logger.log_llm_call(
+            input_tokens=usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0) or usage.get("completion_tokens", 0),
+            duration_ms=(time.time() - llm_start) * 1000,
+        )
 
         # Handle tool calls
         if response.tool_calls:
@@ -459,8 +674,20 @@ class Agent:
 
             for tc in response.tool_calls:
                 t_start = time.time()
+                # Log tool call attempt
+                self.json_logger.log_tool_call(
+                    tool_name=tc.name,
+                    arguments=tc.arguments,
+                )
                 result = self._execute_tool(tc)
                 duration = (time.time() - t_start) * 1000
+
+                # Log tool result
+                self.json_logger.log_tool_result(
+                    tool_name=tc.name,
+                    result=result,
+                    duration_ms=duration,
+                )
 
                 # Audit the tool call
                 self.audit.log_tool_call(
@@ -489,6 +716,7 @@ class Agent:
 
     def _execute_tool(self, tc: ToolCall) -> str:
         """Execute a single tool call and return the result as a string."""
+        from pathlib import Path
         name = tc.name
         args = tc.arguments
 
@@ -505,13 +733,14 @@ class Agent:
             if name == "web_fetch":
                 return fetch_page(args.get("url", ""))
 
-            # -- Subagent tools --
+            # -- Subagent tools (with controlled tool subset) --
             if name == "subagent_run":
                 s_name = args.get("name", "unnamed")
                 s_task = args.get("task", "")
                 s_prompt = args.get("system_prompt", "")
                 agent = self.subagents.spawn(s_name, s_prompt)
-                result = agent.execute(s_task)
+                # Pass controlled tool subset to subagent
+                result = agent.execute(s_task, tools=self._subagent_tools if self._subagent_tools else None)
                 if result.error:
                     return f"[Subagent:{s_name}] Error: {result.error}"
                 return f"[Subagent:{s_name}] Result:\n{result.output}"
@@ -813,6 +1042,137 @@ class Agent:
                     files = [str(f.name) for f in resolved.iterdir()]
                 return "\n".join(sorted(files)) if files else "(empty directory)"
 
+            # -- Repo map --
+            if name == "repo_map":
+                path = args.get("path", "")
+                short = args.get("short", False)
+                root = Path(path).resolve() if path else (
+                    Path(self.config.project_dir).resolve() if self.config.project_dir else Path(".").resolve()
+                )
+                try:
+                    if short:
+                        return build_repo_map_short(root)
+                    return build_repo_map(root)
+                except Exception as e:
+                    logger.error("repo_map error: %s", e)
+                    return f"Error building repo map: {e}"
+
+            # -- Code search --
+            if name == "search_code":
+                pattern = args.get("pattern", "")
+                if not pattern:
+                    return "Please provide a search pattern."
+                file_pattern = args.get("file_pattern")
+                max_results = args.get("max_results", 30)
+                context_lines = args.get("context_lines", 2)
+                case_sensitive = args.get("case_sensitive", False)
+                regex = args.get("regex", False)
+                fixed_strings = args.get("fixed_strings", False)
+                root = Path(self.config.project_dir).resolve() if self.config.project_dir else Path(".").resolve()
+                try:
+                    result = _search_code(
+                        pattern=pattern,
+                        root=root,
+                        file_pattern=file_pattern,
+                        max_results=max_results,
+                        context_lines=context_lines,
+                        case_sensitive=case_sensitive,
+                        regex=regex,
+                        fixed_strings=fixed_strings,
+                    )
+                    return result.formatted(max_results=max_results, context_lines=context_lines)
+                except Exception as e:
+                    logger.error("search_code error: %s", e)
+                    return f"Error searching code: {e}"
+
+            # -- Run tests --
+            if name == "run_tests":
+                command = args.get("command", "")
+                timeout = args.get("timeout", 120)
+                root = Path(self.config.project_dir).resolve() if self.config.project_dir else Path(".").resolve()
+                try:
+                    result = _run_tests(
+                        command=command if command else None,
+                        root=root,
+                        timeout=timeout,
+                    )
+                    parts = [result.summary]
+                    if result.failures:
+                        parts.append(f"\nFailures ({len(result.failures)}):")
+                        for f in result.failures[:10]:
+                            parts.append(f"  • {f.summary()}")
+                        if len(result.failures) > 10:
+                            parts.append(f"  ... and {len(result.failures) - 10} more")
+                    if result.stdout:
+                        # Show last 20 lines of output
+                        lines = result.stdout.splitlines()
+                        tail = lines[-20:] if len(lines) > 20 else lines
+                        parts.append("\nOutput (last lines):")
+                        parts.extend(tail)
+                    return "\n".join(parts)
+                except Exception as e:
+                    logger.error("run_tests error: %s", e)
+                    return f"Error running tests: {e}"
+
+            # -- Auto-correct tests --
+            if name == "auto_correct_tests":
+                test_command = args.get("test_command", "")
+                max_iterations = args.get("max_iterations", 5)
+                timeout = args.get("timeout", 120)
+                root = Path(self.config.project_dir).resolve() if self.config.project_dir else Path(".").resolve()
+
+                # Define the fix function that uses a subagent to fix failures
+                def _fix_with_subagent(failures: list[TestFailure], raw_output: str) -> str:
+                    """Use a subagent to fix test failures."""
+                    if not failures and not raw_output:
+                        return ""
+                    prompt = format_failures_for_llm(failures, raw_output)
+                    prompt += (
+                        "\n\nAnalyze the test failures above and fix the source code. "
+                        "Use read_file to understand the code, then apply_diff to fix it. "
+                        "Focus on making the tests pass. Return a summary of what you fixed."
+                    )
+                    try:
+                        agent = self.subagents.spawn("test_fixer", system_prompt=(
+                            "You are a test-fixing specialist. Analyze test failures, "
+                            "identify root causes in the source code, and fix them. "
+                            "Be precise and minimal in your changes."
+                        ))
+                        result = agent.execute(prompt)
+                        if result.error:
+                            return f"Subagent error: {result.error}"
+                        return result.output[:500]
+                    except Exception as e:
+                        return f"Fix error: {e}"
+
+                try:
+                    correction = auto_correct_loop(
+                        fix_function=_fix_with_subagent,
+                        root=root,
+                        test_command=test_command if test_command else None,
+                        max_iterations=max_iterations,
+                        timeout=timeout,
+                    )
+                    parts = []
+                    if correction.success:
+                        parts.append(f"✅ All tests passed after {correction.iterations} iteration(s)!")
+                    else:
+                        parts.append(f"❌ Tests still failing after {correction.iterations} iteration(s).")
+                    if correction.corrections:
+                        parts.append("\nCorrections applied:")
+                        for c in correction.corrections:
+                            parts.append(f"  • {c}")
+                    if correction.errors:
+                        parts.append("\nIssues:")
+                        for e in correction.errors:
+                            parts.append(f"  • {e}")
+                    if correction.final_result:
+                        parts.append(f"\nFinal: {correction.final_result.summary}")
+                    return "\n".join(parts)
+                except Exception as e:
+                    logger.error("auto_correct_tests error: %s", e)
+                    return f"Error in auto-correction loop: {e}"
+
             if name == "finish":
                 summary = args.get("summary", "")
                 result = args.get("result", "")
@@ -840,5 +1200,7 @@ class Agent:
 
     def shutdown(self) -> None:
         self.mcp.close_all()
+        self.sandbox.restore_cwd()
         self.memory.save_all()
         self.audit.close()
+        self.json_logger.close()

@@ -26,7 +26,7 @@ EXAMPLE_CONFIG_PATH = PROJECT_DIR / "config.example.json"
 DEFAULT_CONFIG: dict[str, Any] = {
     "provider": "openrouter",
     "model": "deepseek/deepseek-v4-flash",
-    "system_prompt": "You are a powerful agentic CLI assistant. You have access to tools, skills, MCP servers, subagents, and web search. Be concise, precise, and helpful.",
+    "system_prompt": "You are a powerful agentic CLI assistant. You have access to tools, skills, MCP servers, subagents, and web search. Be concise, precise, and helpful. IMPORTANT: Do NOT use Markdown formatting in your responses. The terminal does not support Markdown rendering. Use plain text only (no **bold**, no `code`, no |tables|, no ## headings, no ```code blocks).",
     "site_url": "",
     "site_name": "Nyx",
     "request_timeout": 120,
@@ -65,6 +65,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "output_dir": "",
         "max_file_size_mb": 50,
+    },
+    # -- JSON logging --
+    "json_logging": {
+        "enabled": False,
+        "output_path": "",
+        "log_to_stderr": False,
+    },
+    # -- Rate limiting --
+    "rate_limiting": {
+        "enabled": True,
+        "rate": 10.0,
+        "burst": 20,
+        "max_retries": 3,
+        "base_delay": 1.0,
+        "max_delay": 60.0,
+        "request_timeout": 120,
     },
     # -- Diff/patch tool --
     "diff_tool": {
@@ -124,6 +140,17 @@ class Config:
     audit_enabled: bool = True
     audit_output_dir: str = ""
     audit_max_file_size_mb: int = 50
+    # -- JSON logging --
+    json_logging_enabled: bool = False
+    json_logging_output_path: str = ""
+    json_logging_log_to_stderr: bool = False
+    # -- Rate limiting --
+    rate_limiting_enabled: bool = True
+    rate_limiting_rate: float = 10.0
+    rate_limiting_burst: int = 20
+    rate_limiting_max_retries: int = 3
+    rate_limiting_base_delay: float = 1.0
+    rate_limiting_max_delay: float = 60.0
     # -- Diff/patch tool --
     diff_tool_require_approval: bool = True
     diff_tool_show_full_diff: bool = True
@@ -178,8 +205,10 @@ class Config:
 
         # 5. Flatten nested config sections into top-level fields
         cls._flatten_nested(raw, "sandbox", ["enabled", "auto_chdir", "allow_paths", "deny_paths"])
-        cls._flatten_nested(raw, "permissions", ["config"])
+        cls._flatten_nested(raw, "permissions", ["shell", "filesystem"])
         cls._flatten_nested(raw, "audit", ["enabled", "output_dir", "max_file_size_mb"])
+        cls._flatten_nested(raw, "json_logging", ["enabled", "output_path", "log_to_stderr"])
+        cls._flatten_nested(raw, "rate_limiting", ["enabled", "rate", "burst", "max_retries", "base_delay", "max_delay"])
         cls._flatten_nested(raw, "diff_tool", ["require_approval", "show_full_diff"])
 
         # Store a copy of raw config (not self-referencing)
