@@ -370,8 +370,79 @@ def _ansi_autocomplete(partial: str) -> str:
     return partial
 
 
+def setup_readline(agent: Agent) -> None:
+    """Configure readline for command history and tab autocompletion."""
+    try:
+        import readline
+        import glob
+        import atexit
+        
+        commands = [
+            "/help", "/model", "/clear", "/tools", "/memory",
+            "/conversations", "/switch", "/reset", "/exit", "/quit", "/q"
+        ]
+        
+        def completer(text: str, state: int) -> str | None:
+            # 1. Slash commands completion
+            if text.startswith("/"):
+                matches = [c for c in commands if c.startswith(text)]
+                return matches[state] if state < len(matches) else None
+                
+            # 2. File path completion
+            if not text:
+                expanded = "."
+            else:
+                expanded = os.path.expanduser(text)
+            
+            # Match files starting with expanded text
+            matches = glob.glob(expanded + "*")
+            
+            formatted = []
+            for m in matches:
+                # Add trailing slash for directories
+                display = m
+                if os.path.isdir(m):
+                    display += "/"
+                
+                # Try to keep relative paths relative if input was relative
+                if text and not text.startswith("/") and not text.startswith("~"):
+                    try:
+                        # Relativize path
+                        rel = os.path.relpath(m)
+                        if os.path.isdir(m):
+                            rel += "/"
+                        formatted.append(rel)
+                    except ValueError:
+                        formatted.append(display)
+                else:
+                    formatted.append(display)
+            
+            return formatted[state] if state < len(formatted) else None
+
+        readline.set_completer(completer)
+        # Tab key completion (depends on platform)
+        if sys.platform == "darwin":
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+            
+        # History management
+        history_path = os.path.expanduser("~/.nyx_history")
+        try:
+            readline.read_history_file(history_path)
+        except FileNotFoundError:
+            pass
+            
+        readline.set_history_length(1000)
+        atexit.register(readline.write_history_file, history_path)
+        
+    except ImportError:
+        pass
+
+
 def run_ansi_interactive(agent: Agent, config: Config) -> None:
     """Fallback interactive REPL (no Rich)."""
+    setup_readline(agent)
     agent.on_command_approval = _make_ansi_approval_handler()
     agent.on_file_approval = _make_ansi_file_approval_handler()
     history = REPLHistory()

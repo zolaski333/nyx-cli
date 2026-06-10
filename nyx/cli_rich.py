@@ -405,6 +405,8 @@ def _rich_autocomplete(console, partial: str) -> str:
 
 def run_rich_interactive(agent: Agent, config: Config) -> None:
     """Run the interactive REPL with Rich formatting."""
+    from nyx.cli import setup_readline
+    setup_readline(agent)
     console = get_console()
     agent.on_command_approval = _make_rich_approval_handler(console)
     agent.on_file_approval = _make_rich_file_approval_handler(console)
