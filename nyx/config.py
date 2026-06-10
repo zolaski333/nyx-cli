@@ -88,6 +88,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "diff_tool": {
         "require_approval": True,
         "show_full_diff": True,
+        "enable_rollback": True,
+        "enable_history": True,
+        "use_git": True,
+        "max_rollback_entries": 50,
     },
 }
 
@@ -156,6 +160,10 @@ class Config:
     # -- Diff/patch tool --
     diff_tool_require_approval: bool = True
     diff_tool_show_full_diff: bool = True
+    diff_tool_enable_rollback: bool = True
+    diff_tool_enable_history: bool = True
+    diff_tool_use_git: bool = True
+    diff_tool_max_rollback_entries: int = 50
     # -- Raw --
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -212,7 +220,7 @@ class Config:
         cls._flatten_nested(raw, "audit", ["enabled", "output_dir", "max_file_size_mb"])
         cls._flatten_nested(raw, "json_logging", ["enabled", "output_path", "log_to_stderr"])
         cls._flatten_nested(raw, "rate_limiting", ["enabled", "rate", "burst", "max_retries", "base_delay", "max_delay"])
-        cls._flatten_nested(raw, "diff_tool", ["require_approval", "show_full_diff"])
+        cls._flatten_nested(raw, "diff_tool", ["require_approval", "show_full_diff", "enable_rollback", "enable_history", "use_git", "max_rollback_entries"])
 
         # Store a copy of raw config (not self-referencing)
         raw_copy = dict(raw)

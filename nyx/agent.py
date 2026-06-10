@@ -29,7 +29,13 @@ from nyx.permissions import PermissionManager, PermissionLevel
 from nyx.sandbox import Sandbox, PathTraversalError
 from nyx.audit import AuditTrail
 from nyx.json_logger import JSONLogger
-from nyx.diff_tool import PatchTool, compute_diff, compute_diff_from_path
+from nyx.diff_tool import (
+    PatchTool, compute_diff, compute_diff_from_path,
+    ChangeType, PatchInfo, PatchRecord, RollbackEntry,
+    parse_unified_diff, parse_search_replace,
+    validate_patch_syntax, detect_conflicts,
+    format_diff_for_display, get_patch_history,
+)
 from nyx.repo_map import build_repo_map, build_repo_map_short
 from nyx.search_code import search_code as _search_code
 from nyx.test_loop import run_tests as _run_tests
@@ -187,15 +193,37 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="apply_diff",
-        description="Apply a targeted diff/patch to an existing file. Shows the changes as a unified diff and requires user approval. Preferred over write_file for modifying existing files.",
+        description="Apply a unified diff or SEARCH/REPLACE patch to a file. Supports standard unified diff format and SEARCH/REPLACE blocks. Validates syntax, detects conflicts, categorizes changes (CREATE/MODIFY/DELETE), and shows a clear summary before requiring user approval. Preferred over write_file for modifying existing files.",
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path to the file to modify"},
-                "content": {"type": "string", "description": "The FULL new content of the file after applying changes"},
+                "diff": {"type": "string", "description": "The unified diff or SEARCH/REPLACE block to apply. For unified diff, use standard format with @@ hunk headers. For SEARCH/REPLACE, use \\<<<<<<< SEARCH / ======= / \\>>>>>>> REPLACE blocks."},
                 "description": {"type": "string", "description": "Brief description of what this change does"},
             },
-            "required": ["path", "content"],
+            "required": ["path", "diff"],
+        },
+    ),
+    ToolDefinition(
+        name="rollback_file",
+        description="Rollback the most recent change to a file. Restores the file to its state before the last patch was applied.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the file to rollback"},
+            },
+            "required": ["path"],
+        },
+    ),
+    ToolDefinition(
+        name="patch_history",
+        description="Show the history of patches applied to files. Returns a list of recent file modifications with timestamps, change types, and summaries.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Maximum number of history entries to return (default: 20)", "default": 20},
+            },
+            "required": [],
         },
     ),
     ToolDefinition(
@@ -448,7 +476,13 @@ class Agent:
         )
 
         # Patch/diff tool
-        self.patch_tool = PatchTool(approval_callback=self._file_approval_handler)
+        self.patch_tool = PatchTool(
+            approval_callback=self._file_approval_handler,
+            project_dir=config.project_dir if config.project_dir else None,
+            enable_rollback=True,
+            enable_history=True,
+            use_git=True,
+        )
 
         # Collect all tools
         self._all_tools: list[ToolDefinition] = list(BUILTIN_TOOLS)
@@ -939,10 +973,10 @@ class Agent:
                 )
                 return message
 
-            # -- Apply diff (new tool, preferred for modifications) --
+            # -- Apply diff (with patch parsing, validation, conflict detection) --
             if name == "apply_diff":
                 raw_path = args.get("path", "")
-                content = args.get("content", "")
+                diff_text = args.get("diff", "")
                 description = args.get("description", "")
 
                 # Resolve path through sandbox
@@ -958,9 +992,6 @@ class Agent:
                 except Exception as e:
                     return f"Error resolving path: {e}"
 
-                # Compute diff for display
-                diff = compute_diff_from_path(str(resolved), content)
-
                 # Check permissions
                 approved, reason, perm_level = self.permissions.authorize_file_write(str(resolved))
                 self.audit.log_permission_check("filesystem", str(resolved), perm_level.value, approved, reason)
@@ -968,17 +999,49 @@ class Agent:
                 if not approved:
                     return (
                         f"[SECURITY] File write denied: '{raw_path}'\n"
-                        f"Reason: {reason}\n"
-                        f"Diff was:\n{diff[:2000]}"
+                        f"Reason: {reason}"
                     )
 
-                # Use PatchTool for the actual write
-                success, message = self.patch_tool.propose_write(str(resolved), content)
+                # Use PatchTool.propose_patch for full parsing/validation/conflict detection
+                success, message = self.patch_tool.propose_patch(str(resolved), diff_text)
                 self.audit.log_file_operation(
-                    "apply_diff", str(resolved), len(content), success=success,
+                    "apply_diff", str(resolved), len(diff_text), success=success,
                     error="" if success else message,
                 )
                 return message
+
+            # -- Rollback file --
+            if name == "rollback_file":
+                raw_path = args.get("path", "")
+
+                try:
+                    resolved = self.sandbox.resolve(raw_path, for_write=True)
+                except PathTraversalError as e:
+                    return f"[SECURITY] Path traversal blocked: {raw_path}"
+                except Exception as e:
+                    return f"Error resolving path: {e}"
+
+                success, message = self.patch_tool.rollback_last(str(resolved))
+                self.audit.log_file_operation(
+                    "rollback", str(resolved), 0, success=success,
+                    error="" if success else message,
+                )
+                return message
+
+            # -- Patch history --
+            if name == "patch_history":
+                limit = args.get("limit", 20)
+                history = self.patch_tool.get_history(limit=limit)
+                if not history:
+                    return "No patch history available."
+                lines = [f"Patch history ({len(history)} entries):"]
+                for h in history:
+                    lines.append(
+                        f"  [{h.get('type', '?')}] {h.get('filepath', '?')} "
+                        f"— {h.get('summary', '?')} "
+                        f"({h.get('time', '?')})"
+                    )
+                return "\n".join(lines)
 
             # -- Append file (with sandbox + permissions) --
             if name == "append_file":
