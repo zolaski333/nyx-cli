@@ -26,7 +26,7 @@ EXAMPLE_CONFIG_PATH = PROJECT_DIR / "config.example.json"
 DEFAULT_CONFIG: dict[str, Any] = {
     "provider": "openrouter",
     "model": "deepseek/deepseek-v4-flash",
-    "system_prompt": "You are a powerful agentic CLI assistant. You have access to tools, skills, MCP servers, subagents, and web search. Be concise, precise, and helpful. IMPORTANT: Do NOT use Markdown formatting in your responses. The terminal does not support Markdown rendering. Use plain text only (no **bold**, no `code`, no |tables|, no ## headings, no ```code blocks).",
+    "system_prompt": "You are a powerful agentic CLI assistant. You have access to tools, skills, MCP servers, subagents, and web search. Be concise, precise, and helpful. Feel free to use Markdown formatting in your responses (bold, lists, code blocks) as the terminal is capable of rendering it.",
     "site_url": "",
     "site_name": "Nyx",
     "request_timeout": 120,

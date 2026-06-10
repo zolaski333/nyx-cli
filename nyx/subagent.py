@@ -205,8 +205,10 @@ class Subagent:
                 timeout = args.get("timeout", 30)
                 if not command:
                     return "Empty command."
+                # Resolve directory
+                cwd = self._config.project_dir if self._config and self._config.project_dir else None
                 proc = subprocess.run(
-                    command, shell=True, capture_output=True, text=True, timeout=timeout,
+                    command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=cwd
                 )
                 out = proc.stdout or ""
                 err = proc.stderr or ""
@@ -217,26 +219,70 @@ class Subagent:
             if name == "write_file":
                 path = args.get("path", "")
                 content = args.get("content", "")
-                Path(path).write_text(content, encoding="utf-8")
+                project_dir = self._config.project_dir if self._config and self._config.project_dir else None
+                if project_dir:
+                    resolved = Path(project_dir) / path
+                else:
+                    resolved = Path(path)
+                
+                # Ensure directories exist
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                resolved.write_text(content, encoding="utf-8")
                 return f"File written: {path}"
 
             if name == "apply_diff":
                 path = args.get("path", "")
-                content = args.get("content", "")
-                Path(path).write_text(content, encoding="utf-8")
+                diff_text = args.get("content", "")  # sometimes key 'content' is used or 'diff'
+                if not diff_text:
+                    diff_text = args.get("diff", "")
+                
+                project_dir = self._config.project_dir if self._config and self._config.project_dir else None
+                if project_dir:
+                    resolved = Path(project_dir) / path
+                else:
+                    resolved = Path(path)
+                
+                # Check format of diff
+                from nyx.diff_tool import parse_unified_diff, parse_search_replace, _apply_unified_diff_to_content, _apply_search_replace_to_content
+                original = ""
+                if resolved.exists():
+                    original = resolved.read_text(encoding="utf-8")
+                
+                # Quick search-replace or unified diff reconstruction
+                proposed = None
+                if "<<<<<<< SEARCH" in diff_text:
+                    proposed = _apply_search_replace_to_content(original, diff_text)
+                else:
+                    proposed = _apply_unified_diff_to_content(original, diff_text)
+                
+                if proposed is None:
+                    # Fallback to writing content directly if it's full content instead of a diff
+                    proposed = diff_text
+                
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                resolved.write_text(proposed, encoding="utf-8")
                 return f"File written: {path}"
 
             if name == "append_file":
                 path = args.get("path", "")
                 content = args.get("content", "")
-                with open(path, "a", encoding="utf-8") as f:
+                project_dir = self._config.project_dir if self._config and self._config.project_dir else None
+                if project_dir:
+                    resolved = Path(project_dir) / path
+                else:
+                    resolved = Path(path)
+                
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                with open(resolved, "a", encoding="utf-8") as f:
                     f.write(content)
                 return f"Content appended to: {path}"
 
             if name == "run_tests":
                 from nyx.test_loop import run_tests as _rt
                 command = args.get("command", "")
-                result = _rt(command=command if command else None)
+                project_dir = self._config.project_dir if self._config and self._config.project_dir else None
+                root = Path(project_dir).resolve() if project_dir else Path(".").resolve()
+                result = _rt(command=command if command else None, root=root)
                 return result.summary
 
             if name == "finish":

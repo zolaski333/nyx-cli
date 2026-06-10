@@ -68,6 +68,87 @@ def c(text: str, color: str) -> str:
     return f"{color}{text}{RESET}" if supports_color() else text
 
 
+def render_markdown(text: str, force_color: bool = False) -> str:
+    """Render basic markdown using ANSI escape codes for zero-dependency formatting."""
+    has_color = force_color or supports_color()
+
+    import re
+    lines = text.splitlines()
+    rendered_lines = []
+    in_code_block = False
+    
+    # Inline helper to style text if color is enabled/forced
+    def style(txt: str, ansi_code: str) -> str:
+        return f"{ansi_code}{txt}{RESET}" if has_color else txt
+
+    for line in lines:
+        # Code block toggle
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            border_char = "─"
+            rendered_lines.append(style(f"╭{border_char * 78}╮" if in_code_block else f"╰{border_char * 78}╯", DIM + YELLOW))
+            continue
+
+        if in_code_block:
+            # Code block lines
+            rendered_lines.append(style("│ ", DIM + YELLOW) + style(line, YELLOW) + " " * max(0, 76 - len(line)) + style(" │", DIM + YELLOW))
+            continue
+
+        # Headings
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            level = len(m.group(1))
+            heading_text = m.group(2)
+            if level == 1:
+                rendered_lines.append("")
+                rendered_lines.append(style(heading_text.upper(), BOLD + CYAN))
+                rendered_lines.append(style("═" * len(heading_text), BOLD + CYAN))
+            elif level == 2:
+                rendered_lines.append("")
+                rendered_lines.append(style(heading_text, BOLD + YELLOW))
+                rendered_lines.append(style("─" * len(heading_text), DIM + YELLOW))
+            else:
+                rendered_lines.append(style(heading_text, BOLD + GREEN))
+            continue
+
+        # Horizontal rules
+        if re.match(r"^[-*_]{3,}\s*$", line.strip()):
+            rendered_lines.append(style("─" * 80, DIM))
+            continue
+
+        # Blockquotes
+        if line.strip().startswith(">"):
+            content = line.strip().lstrip(">").strip()
+            rendered_lines.append(style("│ ", CYAN) + style(content, DIM))
+            continue
+
+        # Lists (unordered/ordered)
+        m_list = re.match(r"^(\s*)[-*+•]\s+(.*)$", line)
+        if m_list:
+            indent = m_list.group(1)
+            content = m_list.group(2)
+            rendered_lines.append(f"{indent}{style('◈', GREEN)} {content}")
+            continue
+
+        # Style Bold (**text** or __text__)
+        line = re.sub(r"\*\*([^*]+)\*\*", lambda m: style(m.group(1), BOLD), line)
+        line = re.sub(r"__([^_]+)__", lambda m: style(m.group(1), BOLD), line)
+
+        # Style Italic (*text* or _text_)
+        line = re.sub(r"\*([^*]+)\*", lambda m: style(m.group(1), "\033[3m"), line)
+        line = re.sub(r"_([^_]+)_", lambda m: style(m.group(1), "\033[3m"), line)
+
+        # Style Inline Code (`code`)
+        line = re.sub(r"`([^`]+)`", lambda m: style(m.group(1), YELLOW), line)
+
+        # Links [text](url) -> text (url)
+        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: style(m.group(1), BOLD + CYAN) + f" ({m.group(2)})", line)
+
+        rendered_lines.append(line)
+
+    return "\n".join(rendered_lines)
+
+
 # ---------------------------------------------------------------------------
 # ANSI fallback: token streaming callback
 # ---------------------------------------------------------------------------
@@ -535,9 +616,11 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
         try:
             result = agent.run(user_input, on_token=on_token)
             if not config.stream:
-                print(f"{c('Agent', ASSISTANT_COLOR)}> {result}")
+                print(f"{c('Agent', ASSISTANT_COLOR)}> {render_markdown(result)}")
             else:
                 print()
+                # Print rendered Markdown afterwards to replace raw token display with formatted text
+                print(f"\n{c('Agent (formatted)', ASSISTANT_COLOR)}>\n{render_markdown(result)}")
         except Exception as e:
             print(f"\n{c(f'Error: {e}', ERROR_COLOR)}")
 
@@ -549,9 +632,10 @@ def run_ansi_single(agent: Agent, prompt: str) -> None:
         print(f"{c('Agent', ASSISTANT_COLOR)}> ", end="", flush=True)
     result = agent.run(prompt, on_token=on_token)
     if not agent.config.stream:
-        print(f"{c('Agent', ASSISTANT_COLOR)}> {result}")
+        print(f"{c('Agent', ASSISTANT_COLOR)}> {render_markdown(result)}")
     else:
         print()
+        print(f"\n{c('Agent (formatted)', ASSISTANT_COLOR)}>\n{render_markdown(result)}")
     agent.shutdown()
 
 

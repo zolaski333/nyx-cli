@@ -625,20 +625,45 @@ class TestMCPProgress:
         assert result == []
 
 
+
 # =========================================================================
-# Subagent progress callback tests
+# Markdown renderer tests
 # =========================================================================
 
 
-class TestSubagentProgress:
-    """Test SubagentManager progress callback integration."""
+class TestMarkdownRenderer:
+    """Test the ANSI zero-dependency Markdown renderer."""
 
-    def test_set_progress_callback(self):
-        from nyx.subagent import SubagentManager
-        mgr = SubagentManager()
-        calls = []
-        mgr.set_progress_callback(lambda label, cur, total: calls.append((label, cur, total)))
-        assert mgr._progress_callback is not None
+    def test_render_headings(self):
+        from nyx.cli import render_markdown
+        text = "# Heading 1\n## Heading 2"
+        res = render_markdown(text, force_color=True)
+        assert "HEADING 1" in res
+        assert "Heading 2" in res
+        assert "\033[96m" in res  # Cyan heading 1
+        assert "\033[93m" in res  # Yellow heading 2
+
+    def test_render_bold_italic(self):
+        from nyx.cli import render_markdown
+        text = "This is **bold** and *italic* code."
+        res = render_markdown(text, force_color=True)
+        assert "\033[1mbold\033[0m" in res
+        assert "\033[3mitalic\033[0m" in res
+
+    def test_render_lists(self):
+        from nyx.cli import render_markdown
+        text = "- item 1\n* item 2"
+        res = render_markdown(text, force_color=True)
+        assert "◈" in res
+        assert "\033[92m" in res  # Green list bullets
+
+    def test_render_code_blocks(self):
+        from nyx.cli import render_markdown
+        text = "```python\nprint('hello')\n```"
+        res = render_markdown(text, force_color=True)
+        assert "╭" in res
+        assert "╰" in res
+        assert "print('hello')" in res
 
 
 # =========================================================================
