@@ -113,6 +113,10 @@ cd /chemin/vers/mon/projet
 nyx
 ```
 
+> **⚡ Confort de saisie (REPL)** :
+> - **Autocomplétion (Tab)** : Appuie sur `Tab` pour compléter automatiquement les commandes commençant par `/` (comme `/help`, `/model`, `/tools`) ainsi que les chemins de fichiers et dossiers.
+> - **Historique des commandes** : Utilise les flèches `↑` et `↓` pour naviguer dans l'historique de tes commandes passées. L'historique est sauvegardé automatiquement entre les sessions dans le fichier `~/.nyx_history` (jusqu'à 1000 entrées).
+
 ### Single prompt
 
 ```bash
