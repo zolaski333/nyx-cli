@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -708,6 +709,60 @@ class Agent:
 
             for tc in response.tool_calls:
                 t_start = time.time()
+                
+                # Format a friendly console display for tool call
+                target = ""
+                if tc.name in ("read_file", "write_file", "apply_diff", "append_file", "rollback_file"):
+                    target = tc.arguments.get("path", "")
+                elif tc.name == "list_files":
+                    target = tc.arguments.get("path", ".")
+                elif tc.name == "execute_command":
+                    cmd = tc.arguments.get("command", "").strip()
+                    target = (cmd[:60] + "...") if len(cmd) > 60 else cmd
+                elif tc.name == "web_search":
+                    target = tc.arguments.get("query", "")
+                elif tc.name == "web_fetch":
+                    target = tc.arguments.get("url", "")
+                elif tc.name == "subagent_run":
+                    target = tc.arguments.get("name", "")
+                elif tc.name == "parallel_subagents":
+                    tasks = tc.arguments.get("tasks", [])
+                    target = f"{len(tasks)} tasks"
+                elif tc.name == "memory_save":
+                    note = tc.arguments.get("note", "").strip()
+                    target = (note[:40] + "...") if len(note) > 40 else note
+                elif tc.name == "memory_recall":
+                    target = tc.arguments.get("query", "")
+                elif tc.name == "repo_map":
+                    target = tc.arguments.get("path", "")
+                elif tc.name == "search_code":
+                    target = tc.arguments.get("pattern", "")
+                elif tc.name == "run_tests":
+                    cmd = tc.arguments.get("command", "")
+                    target = cmd if cmd else "(default)"
+                else:
+                    # Generic fallback check for custom/MCP tools
+                    for key in ("path", "file", "filepath", "filename", "uri", "url", "command", "query"):
+                        if key in tc.arguments:
+                            val = str(tc.arguments[key]).strip()
+                            if val:
+                                target = (val[:60] + "...") if len(val) > 60 else val
+                                break
+
+                # ANSI styles locally to avoid circular dependencies
+                no_color = os.environ.get("NO_COLOR")
+                c_reset = "\033[0m"
+                c_yellow_dim = "\033[2m\033[93m"
+                c_cyan = "\033[96m"
+                c_green = "\033[92m"
+                c_red = "\033[91m"
+                
+                def color_text(txt: str, code: str) -> str:
+                    return f"{code}{txt}{c_reset}" if not no_color else txt
+
+                target_str = f" ➔ {color_text(target, c_cyan)}" if target else ""
+                print(f"🛠️  [{color_text('Tool Call', c_yellow_dim)}] {tc.name}{target_str}", flush=True)
+
                 # Log tool call attempt
                 self.json_logger.log_tool_call(
                     tool_name=tc.name,
@@ -715,6 +770,36 @@ class Agent:
                 )
                 result = self._execute_tool(tc)
                 duration = (time.time() - t_start) * 1000
+                
+                # Format friendly console display for tool result
+                duration_str = f"{duration/1000:.2f}s" if duration >= 1000 else f"{int(duration)}ms"
+                is_err = "error" in result.lower() or "[error]" in result.lower() or "denied" in result.lower()
+                status_icon = "❌" if is_err else "✓"
+                status_color = c_red if is_err else c_green
+                status_text = "Failure" if is_err else "Success"
+                
+                # Extract clean/useful details (e.g., number of lines)
+                detail_parts = []
+                if not is_err:
+                    if tc.name == "read_file":
+                        lines_count = len(result.splitlines())
+                        detail_parts.append(f"{lines_count} lines read")
+                    elif tc.name in ("write_file", "append_file"):
+                        content = tc.arguments.get("content", "")
+                        lines_count = len(content.splitlines())
+                        detail_parts.append(f"{lines_count} lines written")
+                    elif tc.name == "apply_diff":
+                        diff = tc.arguments.get("diff", "")
+                        lines_count = len(diff.splitlines())
+                        detail_parts.append(f"{lines_count} lines diff")
+                    elif tc.name == "execute_command":
+                        if result.strip() and result != "(no output)":
+                            lines_count = len(result.splitlines())
+                            detail_parts.append(f"{lines_count} lines output")
+                
+                detail_parts.append(f"took {duration_str}")
+                detail_str = ", ".join(detail_parts)
+                print(f"{status_icon}  [{color_text('Tool ' + status_text, status_color)}] {tc.name}{target_str} ({detail_str})", flush=True)
 
                 # Log tool result
                 self.json_logger.log_tool_result(

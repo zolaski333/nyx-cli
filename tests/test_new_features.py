@@ -666,6 +666,109 @@ class TestMarkdownRenderer:
         assert "print('hello')" in res
 
 
+
+
+
+class TestToolLogging:
+    """Test tool execution console logging."""
+
+    def test_tool_logging_format(self, monkeypatch):
+        import io
+        import sys
+        from nyx.agent import Agent, ToolCall
+        from nyx.config import Config
+        from nyx.providers.base import LLMResponse
+
+        # Set environment variable NO_COLOR=1 so we don't have to deal with ANSI escape codes in assertions
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        captured_output = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", captured_output)
+
+        config = Config(provider="openai", openai_api_key="sk-test")
+        agent = Agent(config=config)
+
+        # Mock the execute_tool method
+        agent._execute_tool = lambda tc: "Line 1\nLine 2\nLine 3"
+
+        mock_tool_call = ToolCall(id="tc-1", name="read_file", arguments={"path": "src/main.py"})
+        mock_response = LLMResponse(
+            content="",
+            tool_calls=[mock_tool_call],
+            usage={"total_tokens": 10}
+        )
+        
+        class MockProvider:
+            def __init__(self):
+                self.calls = 0
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return mock_response
+                return LLMResponse(content="All done!", usage={"total_tokens": 5})
+
+        agent.provider = MockProvider()
+        agent.run("test prompt")
+
+        output = captured_output.getvalue()
+        assert "🛠️  [Tool Call] read_file ➔ src/main.py" in output
+        assert "✓  [Tool Success] read_file ➔ src/main.py (3 lines read, took" in output
+
+    def test_tool_logging_format_multiple_tools(self, monkeypatch):
+        import io
+        import sys
+        from nyx.agent import Agent, ToolCall
+        from nyx.config import Config
+        from nyx.providers.base import LLMResponse
+
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        captured_output = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", captured_output)
+
+        config = Config(provider="openai", openai_api_key="sk-test")
+        agent = Agent(config=config)
+
+        tcs = [
+            ToolCall(id="tc-1", name="execute_command", arguments={"command": "ls -la"}),
+            ToolCall(id="tc-2", name="custom_tool", arguments={"filepath": "custom_path.txt"}),
+        ]
+        
+        mock_response = LLMResponse(
+            content="",
+            tool_calls=tcs,
+            usage={"total_tokens": 10}
+        )
+        
+        class MockProvider:
+            def __init__(self):
+                self.calls = 0
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return mock_response
+                return LLMResponse(content="Done!", usage={"total_tokens": 5})
+
+        agent.provider = MockProvider()
+        
+        def mock_exec(tc):
+            if tc.name == "execute_command":
+                return "file1.txt\nfile2.txt\n"
+            return "ok"
+        agent._execute_tool = mock_exec
+
+        agent.run("test prompt")
+
+        output = captured_output.getvalue()
+        # Check execute_command
+        assert "🛠️  [Tool Call] execute_command ➔ ls -la" in output
+        assert "✓  [Tool Success] execute_command ➔ ls -la (2 lines output, took" in output
+        
+        # Check custom_tool (fallback check for key 'filepath')
+        assert "🛠️  [Tool Call] custom_tool ➔ custom_path.txt" in output
+        assert "✓  [Tool Success] custom_tool ➔ custom_path.txt (took" in output
+
+
 # =========================================================================
 # Helper to get static tools for testing
 # =========================================================================
