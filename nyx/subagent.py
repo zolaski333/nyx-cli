@@ -156,21 +156,23 @@ class Subagent:
         try:
             if name == "read_file":
                 path = args.get("path", "")
-                p = Path(path)
-                if p.exists():
-                    return p.read_text(encoding="utf-8", errors="ignore")[:5000]
+                project_dir = self._config.project_dir if self._config and self._config.project_dir else None
+                resolved = Path(project_dir) / path if project_dir else Path(path)
+                if resolved.exists():
+                    return resolved.read_text(encoding="utf-8", errors="ignore")[:5000]
                 return f"File not found: {path}"
 
             if name == "list_files":
                 path = args.get("path", ".")
                 recursive = args.get("recursive", False)
-                p = Path(path)
-                if not p.exists() or not p.is_dir():
+                project_dir = self._config.project_dir if self._config and self._config.project_dir else None
+                resolved = Path(project_dir) / path if project_dir else Path(path)
+                if not resolved.exists() or not resolved.is_dir():
                     return f"Directory not found: {path}"
                 if recursive:
-                    files = [str(f) for f in p.rglob("*")]
+                    files = [str(f.relative_to(resolved)) for f in resolved.rglob("*")]
                 else:
-                    files = [str(f.name) for f in p.iterdir()]
+                    files = [str(f.name) for f in resolved.iterdir()]
                 return "\n".join(sorted(files)) if files else "(empty directory)"
 
             if name == "search_code":
@@ -178,7 +180,8 @@ class Subagent:
                 pattern = args.get("pattern", "")
                 if not pattern:
                     return "No pattern provided."
-                root = Path(".").resolve()
+                project_dir = self._config.project_dir if self._config and self._config.project_dir else None
+                root = Path(project_dir).resolve() if project_dir else Path(".").resolve()
                 result = _sc(pattern, root=root)
                 return result.formatted(max_results=20, context_lines=2)
 
