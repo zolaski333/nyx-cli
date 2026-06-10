@@ -196,15 +196,29 @@ def _get_test_info(root: Path) -> dict[str, Any]:
         if d.is_dir():
             info["test_dirs"].append(str(d.relative_to(root)))
 
-    # Find test files
-    for pattern in TEST_FILE_PATTERNS:
-        for f in sorted(root.rglob(pattern)):
-            try:
-                rel = str(f.relative_to(root))
-                if rel not in info["test_files"]:
-                    info["test_files"].append(rel)
-            except ValueError:
-                continue
+    # Find test files (optimized to avoid scanning virtualenvs, node_modules, etc.)
+    import fnmatch
+    ignored_dirs = {
+        ".git", ".venv", "node_modules", ".nyx", "__pycache__",
+        ".pytest_cache", ".nyx_memory", "build", "dist", "nyx.egg-info",
+        "venv", "env", ".env",
+    }
+    test_files_found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune ignored directories in-place
+        dirnames[:] = [d for d in dirnames if d not in ignored_dirs and not d.startswith(".")]
+        for filename in filenames:
+            for pattern in TEST_FILE_PATTERNS:
+                if fnmatch.fnmatch(filename, pattern):
+                    filepath = Path(dirpath) / filename
+                    try:
+                        rel = str(filepath.relative_to(root))
+                        if rel not in test_files_found:
+                            test_files_found.append(rel)
+                    except ValueError:
+                        continue
+                    break
+    info["test_files"] = sorted(test_files_found)
 
     # Detect test framework from config files
     pyproject = root / "pyproject.toml"

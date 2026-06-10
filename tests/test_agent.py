@@ -204,7 +204,7 @@ class TestAgentBuiltinTools:
             self.agent.on_file_approval = lambda path, summary, diff: (True, "")
             tc = ToolCall(id="1", name="apply_diff", arguments={
                 "path": filepath,
-                "content": "new content",
+                "diff": "<<<<<<< SEARCH\n=======\nnew content\n>>>>>>> REPLACE",
                 "description": "Create new file",
             })
             result = self.agent._execute_tool(tc)
@@ -225,7 +225,7 @@ class TestAgentBuiltinTools:
             self.agent.on_file_approval = lambda path, summary, diff: (True, "")
             tc = ToolCall(id="1", name="apply_diff", arguments={
                 "path": filepath,
-                "content": "modified content\n",
+                "diff": "<<<<<<< SEARCH\noriginal content\n=======\nmodified content\n>>>>>>> REPLACE",
                 "description": "Modify file",
             })
             result = self.agent._execute_tool(tc)

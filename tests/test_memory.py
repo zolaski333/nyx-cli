@@ -79,6 +79,7 @@ class TestMemoryManager:
     def test_save_and_load_persistence(self):
         self.memory.add_entry("user", "persistent message")
         conv_id = self.memory.current.id
+        self.memory.save_all()
 
         # Create new memory manager pointing to same dir
         memory2 = MemoryManager(memory_dir=self.tmpdir, auto_summarise=False)

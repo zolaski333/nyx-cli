@@ -76,7 +76,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Tuned for fast models (DeepSeek V4 Flash). The local token bucket
     # should not be a bottleneck — real rate limits are enforced server-side.
     "rate_limiting": {
-        "enabled": True,
+        "enabled": False,
         "rate": 100.0,       # was 10.0 — allow up to 100 req/s locally
         "burst": 50,         # was 20  — allow bursts of 50
         "max_retries": 1,    # was 3   — only 1 retry, no exponential backoff spiral
@@ -151,12 +151,12 @@ class Config:
     json_logging_output_path: str = ""
     json_logging_log_to_stderr: bool = False
     # -- Rate limiting --
-    rate_limiting_enabled: bool = True
-    rate_limiting_rate: float = 10.0
-    rate_limiting_burst: int = 20
-    rate_limiting_max_retries: int = 3
-    rate_limiting_base_delay: float = 1.0
-    rate_limiting_max_delay: float = 60.0
+    rate_limiting_enabled: bool = False
+    rate_limiting_rate: float = 100.0
+    rate_limiting_burst: int = 50
+    rate_limiting_max_retries: int = 1
+    rate_limiting_base_delay: float = 0.5
+    rate_limiting_max_delay: float = 10.0
     # -- Diff/patch tool --
     diff_tool_require_approval: bool = True
     diff_tool_show_full_diff: bool = True
