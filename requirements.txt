@@ -1,4 +1,4 @@
-# Nyx — no external dependencies required!
+# Nyx — no external dependencies required
 # The entire tool runs on Python 3.10+ standard library only.
 #
 # Optional dependencies:
