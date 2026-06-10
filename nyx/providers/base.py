@@ -41,13 +41,16 @@ class BaseLLMProvider(ABC):
     def __init__(self, config) -> None:
         self.config = config
         # Build a resilient client from config if rate limiting is enabled
+        # NOTE: Defaults are tuned for fast models (DeepSeek V4 Flash).
+        # Rate limiting is intentionally permissive — the local token bucket
+        # should not be a bottleneck. Real rate limits are enforced server-side.
         if getattr(config, "rate_limiting_enabled", True):
             self._resilient_client = ResilientClient(
-                rate=getattr(config, "rate_limiting_rate", 10.0),
-                burst=getattr(config, "rate_limiting_burst", 20),
-                max_retries=getattr(config, "rate_limiting_max_retries", 3),
-                base_delay=getattr(config, "rate_limiting_base_delay", 1.0),
-                max_delay=getattr(config, "rate_limiting_max_delay", 60.0),
+                rate=getattr(config, "rate_limiting_rate", 100.0),       # was 10.0
+                burst=getattr(config, "rate_limiting_burst", 50),        # was 20
+                max_retries=getattr(config, "rate_limiting_max_retries", 1),  # was 3
+                base_delay=getattr(config, "rate_limiting_base_delay", 0.5),  # was 1.0
+                max_delay=getattr(config, "rate_limiting_max_delay", 10.0),   # was 60.0
                 default_timeout=getattr(config, "request_timeout", 120),
             )
         else:

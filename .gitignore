@@ -30,6 +30,9 @@ Thumbs.db
 # Nyx memory & runtime
 .nyx_memory/
 
+# Nyx audit logs (NDJSON files — every tool call, permission check, file operation)
+.nyx/audit/
+
 # Testing
 .pytest_cache/
 .coverage

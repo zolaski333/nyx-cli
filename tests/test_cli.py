@@ -1,11 +1,15 @@
 """Tests for the Nyx CLI — argument parsing, REPL, --prompt, --dir, --no-stream."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,10 +18,140 @@ import pytest
 NYX_CLI = str(Path(__file__).resolve().parent.parent / "nyx" / "cli.py")
 
 
+# ---------------------------------------------------------------------------
+# Mock LLM HTTP server — replaces the real OpenRouter API during tests
+# ---------------------------------------------------------------------------
+
+
+class _MockLLMHandler(BaseHTTPRequestHandler):
+    """HTTP handler that simulates an LLM chat completion endpoint."""
+
+    # Shared state across all handler instances
+    responses: list[dict[str, Any]] = []
+    request_count = 0
+
+    def do_POST(self):
+        _MockLLMHandler.request_count += 1
+
+        # Read the request body
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length).decode("utf-8")
+        req_data = json.loads(body)
+
+        is_stream = req_data.get("stream", False)
+
+        if is_stream:
+            self._send_streaming_response()
+        else:
+            self._send_non_stream_response()
+
+    def _send_non_stream_response(self) -> None:
+        """Send a non-streaming response."""
+        if _MockLLMHandler.responses:
+            resp_data = _MockLLMHandler.responses.pop(0)
+        else:
+            resp_data = {
+                "id": "mock-cmpl-xxx",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "mock-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Hello from mock LLM!"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(resp_data).encode("utf-8"))
+
+    def _send_streaming_response(self) -> None:
+        """Send a streaming SSE response."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        chunks = [
+            {"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": " from"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": " mock"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": " LLM!"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": ""}, "finish_reason": "stop"}]},
+        ]
+        for chunk in chunks:
+            line = f"data: {json.dumps(chunk)}\n\n"
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
+    def log_message(self, format, *args):
+        """Suppress HTTP server log output during tests."""
+        pass
+
+
+class _MockLLMServer:
+    """Manages a background HTTP server that mocks the LLM API."""
+
+    def __init__(self):
+        self._server = HTTPServer(("127.0.0.1", 0), _MockLLMHandler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._config_path: str | None = None
+
+    @property
+    def port(self) -> int:
+        return self._server.server_address[1]
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/api/v1/chat/completions"
+
+    def start(self) -> dict[str, str]:
+        """Start the server and return env vars pointing to it."""
+        self._thread.start()
+        return {
+            "NYX_OPENROUTER_BASE_URL": self.base_url,
+            "NYX_MODEL": "mock-model",
+            "NYX_PROVIDER": "openrouter",
+        }
+
+    def stop(self):
+        """Stop the server."""
+        self._server.shutdown()
+
+    def reset(self):
+        """Reset handler state between tests."""
+        _MockLLMHandler.responses = []
+        _MockLLMHandler.request_count = 0
+
+
+# Module-level mock server instance (started once per test session)
+_MOCK_SERVER = _MockLLMServer()
+_MOCK_ENV_VARS: dict[str, str] | None = None
+
+
+def _ensure_mock_server() -> dict[str, str]:
+    """Start the mock server if not already running, return env vars."""
+    global _MOCK_ENV_VARS
+    if _MOCK_ENV_VARS is None:
+        _MOCK_ENV_VARS = _MOCK_SERVER.start()
+    _MOCK_SERVER.reset()
+    return _MOCK_ENV_VARS
+
+
 def _run_nyx(*args: str, env: dict[str, str] | None = None, timeout: int = 10) -> subprocess.CompletedProcess:
     """Run the nyx CLI with given arguments and return the result."""
+    mock_env = _ensure_mock_server()
     cmd = [sys.executable, NYX_CLI, *args]
     merged_env = os.environ.copy()
+    # Inject mock server env vars (low priority — can be overridden by caller)
+    for k, v in mock_env.items():
+        merged_env.setdefault(k, v)
     if env:
         merged_env.update(env)
     # Set a dummy API key so config validation passes
@@ -29,6 +163,15 @@ def _run_nyx(*args: str, env: dict[str, str] | None = None, timeout: int = 10) -
         timeout=timeout,
         env=merged_env,
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _mock_server_lifetime():
+    """Start the mock LLM server before the test session and stop it after."""
+    # Server is started lazily by _ensure_mock_server on first use
+    yield
+    # Clean up after all tests
+    _MOCK_SERVER.stop()
 
 
 # =========================================================================

@@ -73,13 +73,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "log_to_stderr": False,
     },
     # -- Rate limiting --
+    # Tuned for fast models (DeepSeek V4 Flash). The local token bucket
+    # should not be a bottleneck — real rate limits are enforced server-side.
     "rate_limiting": {
         "enabled": True,
-        "rate": 10.0,
-        "burst": 20,
-        "max_retries": 3,
-        "base_delay": 1.0,
-        "max_delay": 60.0,
+        "rate": 100.0,       # was 10.0 — allow up to 100 req/s locally
+        "burst": 50,         # was 20  — allow bursts of 50
+        "max_retries": 1,    # was 3   — only 1 retry, no exponential backoff spiral
+        "base_delay": 0.5,   # was 1.0 — start retry after 0.5s
+        "max_delay": 10.0,   # was 60.0 — never wait more than 10s for retry
         "request_timeout": 120,
     },
     # -- Diff/patch tool --
@@ -187,6 +189,7 @@ class Config:
             "ANTHROPIC_API_KEY": "anthropic_api_key",
             "NYX_MODEL": "model",
             "NYX_PROVIDER": "provider",
+            "NYX_OPENROUTER_BASE_URL": "openrouter_base_url",
         }
         for env_key, config_key in env_map.items():
             val = os.environ.get(env_key, "").strip()
