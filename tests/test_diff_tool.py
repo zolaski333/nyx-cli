@@ -464,7 +464,12 @@ class TestApplyPatch:
             assert success
             assert filepath.exists()
             assert filepath.read_text() == "hello world"
-            assert rollback is None  # No rollback for new files
+            # New files now get a sentinel rollback entry so they can be rolled back (deleted)
+            from nyx.diff_tool import NYX_NEW_FILE_SENTINEL
+            assert rollback is not None, "New files should have a sentinel rollback entry"
+            sentinel_content = Path(rollback.backup_path).read_text(encoding="utf-8")
+            assert sentinel_content == NYX_NEW_FILE_SENTINEL, "Backup should contain sentinel"
+
 
     def test_apply_patch_with_rollback(self):
         with tempfile.TemporaryDirectory() as tmpdir:

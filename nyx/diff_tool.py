@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 ROLLBACK_DIR_NAME = ".nyx/rollback"
 PATCHES_DIR_NAME = ".nyx/patches"
 MAX_ROLLBACK_ENTRIES = 50
+# Sentinel stored in rollback backup for newly-created files
+# (no previous content to restore — rollback means: delete the file)
+NYX_NEW_FILE_SENTINEL = "__NYX_CREATED_FILE__\n"
 
 
 # ---------------------------------------------------------------------------
@@ -714,11 +717,15 @@ def apply_patch(
     rollback_entry = None
 
     try:
-        # Save original for rollback if file exists and rollback enabled
-        if enable_rollback and p.exists():
+        # Save original for rollback (if file exists, save content; if new, save sentinel)
+        if enable_rollback:
             try:
-                original = p.read_text(encoding="utf-8")
-                rollback_entry = _save_rollback(path, original, project_dir)
+                if p.exists():
+                    original = p.read_text(encoding="utf-8")
+                    rollback_entry = _save_rollback(path, original, project_dir)
+                else:
+                    # New file: save sentinel so rollback can delete it
+                    rollback_entry = _save_rollback(path, NYX_NEW_FILE_SENTINEL, project_dir)
             except Exception as e:
                 logger.warning("Could not save rollback for %s: %s", path, e)
 
@@ -1168,12 +1175,23 @@ class PatchTool:
         if original and patch_info.change_type == ChangeType.MODIFY:
             conflicts = detect_conflicts(original, patch_info, str(path))
             if conflicts:
+                # Include a snippet of the current file content so the AI can
+                # regenerate the patch against the actual current state.
+                current_preview_lines = original.splitlines()
+                max_preview = 60
+                preview = "\n".join(current_preview_lines[:max_preview])
+                if len(current_preview_lines) > max_preview:
+                    preview += f"\n... ({len(current_preview_lines) - max_preview} more lines)"
                 return (
                     False,
-                    f"Conflicts detected in {path}:\n"
+                    f"[CONFLICT] Patch conflicts with current content of {path}\n"
                     + "\n".join(f"  ⚠ {c}" for c in conflicts)
-                    + "\n\nThe file has changed since the patch was generated. "
-                    + "Please regenerate the patch against the current file content.",
+                    + "\n\n"
+                    + "The file has been modified since this patch was generated.\n"
+                    + "To fix: use write_file with the complete new content, "
+                    + "or regenerate apply_diff after reading the current file.\n"
+                    + f"\nCurrent file content ({len(current_preview_lines)} lines):\n"
+                    + "```\n" + preview + "\n```",
                 )
 
         # Apply the patch to produce proposed content
@@ -1260,6 +1278,24 @@ class PatchTool:
         latest = backups[0]
         content = latest.read_text(encoding="utf-8")
         target = Path(filepath)
+
+        # Check if this was a newly-created file (sentinel)
+        if content == NYX_NEW_FILE_SENTINEL:
+            # Rollback = delete the file
+            try:
+                latest.unlink()  # Remove backup
+            except OSError:
+                pass
+            if target.exists():
+                try:
+                    target.unlink()
+                    logger.info("Rollback (new file deleted): %s", filepath)
+                    return True, f"Rolled back: deleted newly-created file {filepath}"
+                except Exception as e:
+                    return False, f"Rollback error (could not delete {filepath}): {e}"
+            return True, f"Rolled back: file {filepath} did not exist (already clean)"
+
+        # Normal rollback: restore previous content
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 

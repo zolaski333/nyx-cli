@@ -90,6 +90,8 @@ def help_panel() -> Any:
     table.add_row("/help", "Show this help")
     table.add_row("/model", "Show current model")
     table.add_row("/model <name>", "Change model")
+    table.add_row("/mode <name>", "Switch mode: chat | code | architect | debug")
+    table.add_row("/autonomy <lvl>", "Switch autonomy: ask | auto | yolo")
     table.add_row("/clear", "Clear conversation context")
     table.add_row("/tools [N]", "List tools (paginated, optional page N)")
     table.add_row("/memory [N]", "Show memory status (paginated entries)")
@@ -459,6 +461,26 @@ def run_rich_interactive(agent: Agent, config: Config) -> None:
             console.print(f"[bold]Model changed:[/bold] [yellow]{config.model}[/yellow]")
             continue
 
+        if user_input.startswith("/mode"):
+            rest = user_input[5:].strip()
+            if not rest:
+                console.print(f"[bold]Current mode:[/bold] [yellow]{config.agent_mode}[/yellow]  |  autonomy: [cyan]{config.agent_autonomy}[/cyan]")
+            else:
+                msg = agent.switch_mode(rest)
+                style = "green" if "switched" in msg else "yellow"
+                console.print(f"[{style}]{msg}[/{style}]")
+            continue
+
+        if user_input.startswith("/autonomy"):
+            rest = user_input[9:].strip()
+            if not rest:
+                console.print(f"[bold]Current autonomy:[/bold] [cyan]{config.agent_autonomy}[/cyan]")
+            else:
+                msg = agent.switch_autonomy(rest)
+                style = "green" if "switched" in msg else "yellow"
+                console.print(f"[{style}]{msg}[/{style}]")
+            continue
+
         # Paginated commands
         if user_input.startswith("/tools"):
             page = _get_paginated_arg(user_input, "/tools")
@@ -522,6 +544,9 @@ def run_rich_interactive(agent: Agent, config: Config) -> None:
 def run_rich_single(agent: Agent, prompt: str) -> None:
     """Run a single prompt with Rich formatting."""
     console = get_console()
+    # Wire approval callbacks (same as interactive mode)
+    agent.on_command_approval = _make_rich_approval_handler(console)
+    agent.on_file_approval = _make_rich_file_approval_handler(console)
     on_token = _make_rich_on_token()
 
     if agent.config.stream:

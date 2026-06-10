@@ -87,5 +87,11 @@
   "diff_tool": {
     "require_approval": true,
     "show_full_diff": true
+  },
+
+  "agent": {
+    "mode": "chat",
+    "autonomy": "ask",
+    "max_depth": 50
   }
 }

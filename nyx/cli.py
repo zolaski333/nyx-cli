@@ -227,6 +227,8 @@ HELP_TEXT = f"""
   {c('/help', CYAN)}         Show this help
   {c('/model', CYAN)}        Show current model
   {c('/model <name>', CYAN)} Change model
+  {c('/mode <name>', CYAN)}  Switch mode: chat | code | architect | debug
+  {c('/autonomy <lvl>', CYAN)} Switch autonomy: ask | auto | yolo
   {c('/clear', CYAN)}        Clear conversation context
   {c('/tools', CYAN)}        List all available tools
   {c('/memory', CYAN)}       Show memory status
@@ -572,6 +574,24 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
             print(f"{c('Model changed:', BOLD)} {config.model}")
             continue
 
+        if user_input.startswith("/mode"):
+            rest = user_input[5:].strip()
+            if not rest:
+                print(f"{c('Current mode:', BOLD)} {config.agent_mode}  |  autonomy: {config.agent_autonomy}")
+            else:
+                msg = agent.switch_mode(rest)
+                print(f"{c(msg, GREEN if 'switched' in msg else YELLOW)}")
+            continue
+
+        if user_input.startswith("/autonomy"):
+            rest = user_input[9:].strip()
+            if not rest:
+                print(f"{c('Current autonomy:', BOLD)} {config.agent_autonomy}")
+            else:
+                msg = agent.switch_autonomy(rest)
+                print(f"{c(msg, GREEN if 'switched' in msg else YELLOW)}")
+            continue
+
         # Paginated commands
         if user_input.startswith("/tools"):
             page = _get_paginated_arg(user_input, "/tools")
@@ -627,6 +647,9 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
 
 def run_ansi_single(agent: Agent, prompt: str) -> None:
     """Fallback single-prompt mode (no Rich)."""
+    # Wire approval callbacks (same as interactive mode)
+    agent.on_command_approval = _make_ansi_approval_handler()
+    agent.on_file_approval = _make_ansi_file_approval_handler()
     on_token = _make_ansi_on_token()
     if agent.config.stream:
         print(f"{c('Agent', ASSISTANT_COLOR)}> ", end="", flush=True)
@@ -712,6 +735,14 @@ def main() -> None:
     parser.add_argument("--no-rich", action="store_true", help="Force basic CLI even if Rich is installed")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
     parser.add_argument("--json", action="store_true", help="JSON output mode for CI/CD pipelines (requires --prompt)")
+    # -- Mode & autonomy --
+    parser.add_argument("--mode", type=str, default="", choices=["chat", "code", "architect", "debug"],
+                        help="Agent mode: chat (default) | code | architect (read-only) | debug")
+    parser.add_argument("--autonomy", type=str, default="", choices=["ask", "auto", "yolo"],
+                        help="Autonomy level: ask (default) | auto (skip file prompts) | yolo (skip all prompts)")
+    parser.add_argument("--auto", action="store_true", help="Shortcut for --autonomy auto")
+    parser.add_argument("--yolo", action="store_true", help="Shortcut for --autonomy yolo (no approval prompts)")
+    parser.add_argument("--max-depth", type=int, default=0, help="Override max reasoning depth (default: 50)")
 
     args = parser.parse_args()
     _setup_logging(args.verbose)
@@ -761,6 +792,18 @@ def main() -> None:
         except FileNotFoundError:
             # CWD was deleted (e.g. by a previous test); fall back to script dir
             config.project_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Mode & autonomy overrides
+    if args.mode:
+        config.agent_mode = args.mode
+    if args.yolo:
+        config.agent_autonomy = "yolo"
+    elif args.auto:
+        config.agent_autonomy = "auto"
+    elif args.autonomy:
+        config.agent_autonomy = args.autonomy
+    if args.max_depth > 0:
+        config.agent_max_depth = args.max_depth
 
     logger.info("Starting Nyx with provider=%s model=%s", config.provider, config.model)
 

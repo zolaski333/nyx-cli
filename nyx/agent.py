@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from nyx.config import Config
+from nyx.config import Config, MODE_SYSTEM_PROMPTS, AUTONOMY_CONFIGS, ARCHITECT_TOOLS
 from nyx.providers.base import BaseLLMProvider, LLMResponse, ToolCall, ToolDefinition
 from nyx.providers import get_provider
 from nyx.mcp_client import MCPManager
@@ -405,8 +405,8 @@ class Agent:
         Returns (approved: bool, reason: str).
         If no approval callback is configured, the command is denied by default.
         """
-        if self.on_command_approval:
-            return self.on_command_approval(command)
+        if self._on_command_approval:
+            return self._on_command_approval(command)
         # Default: deny if no approval mechanism is configured
         logger.warning("No approval callback configured, denying dangerous command: %s", command)
         return False, "No approval mechanism configured. This command requires manual approval."
@@ -435,12 +435,11 @@ class Agent:
             provider_factory=lambda: get_provider(config),
         )
         self.on_token = on_token
-        self.on_command_approval = on_command_approval
-        self.on_file_approval = on_file_approval
+        self._on_command_approval = on_command_approval
+        self._on_file_approval = on_file_approval
         self.context = AgentContext()
         self.call_depth = 0
-        self.max_depth = 15
-
+        self.max_depth = config.agent_max_depth
         # Controlled tool subset for subagents (set after setup)
         self._subagent_tools: list[ToolDefinition] = []
 
@@ -488,16 +487,54 @@ class Agent:
         # Collect all tools
         self._all_tools: list[ToolDefinition] = list(BUILTIN_TOOLS)
 
+    # ------------------------------------------------------------------
+    # Approval callback properties (keep PermissionManager in sync)
+    # ------------------------------------------------------------------
+
+    @property
+    def on_command_approval(self) -> Callable[[str], tuple[bool, str]] | None:
+        return self._on_command_approval
+
+    @on_command_approval.setter
+    def on_command_approval(self, callback: Callable[[str], tuple[bool, str]] | None) -> None:
+        self._on_command_approval = callback
+        # Sync to PermissionManager so PROMPT-level shell commands can be approved
+        if hasattr(self, "permissions"):
+            if callback:
+                def _pm_shell_callback(cat: str, desc: str, target: str) -> tuple[bool, str]:
+                    if cat == "shell":
+                        return callback(target)
+                    return True, ""
+                self.permissions.set_approval_callback(_pm_shell_callback)
+            else:
+                self.permissions.set_approval_callback(None)
+
+    @property
+    def on_file_approval(self) -> Callable[[str, str, str], tuple[bool, str]] | None:
+        return self._on_file_approval
+
+    @on_file_approval.setter
+    def on_file_approval(self, callback: Callable[[str, str, str], tuple[bool, str]] | None) -> None:
+        self._on_file_approval = callback
+        # Sync to PatchTool so file writes go through the interactive prompt
+        if hasattr(self, "patch_tool"):
+            self.patch_tool.set_approval_callback(
+                self._file_approval_handler
+            )
+
     def _file_approval_handler(self, path: str, summary: str, diff: str) -> tuple[bool, str]:
         """Handle file operation approval requests from the PatchTool."""
-        if self.on_file_approval:
-            return self.on_file_approval(path, summary, diff)
-        # If no callback, check permissions
-        approved, reason, _ = self.permissions.authorize_file_write(path)
-        return approved, reason
+        if self._on_file_approval:
+            return self._on_file_approval(path, summary, diff)
+        # If no interactive callback, fall back to permission rules (allow/deny only)
+        level = self.permissions.check_file_write(path)
+        if level == PermissionLevel.DENY:
+            return False, f"Writing to this path is explicitly denied by security policy: {path}"
+        # ALLOW or PROMPT without a callback → allow (sandbox already validated the path)
+        return True, ""
 
     def setup(self) -> None:
-        """Connect MCP servers, discover skills, inject memory summary and repo map."""
+        """Connect MCP servers, discover skills, inject memory summary, repo map, and mode config."""
         # MCP
         if self.config.mcp_servers:
             logger.info("Connecting MCP servers...")
@@ -557,6 +594,9 @@ class Agent:
             except Exception as e:
                 logger.debug("Could not build repo map: %s", e)
 
+        # -- Mode & autonomy configuration --
+        self._apply_mode_config()
+
         # -- Controlled tool subset for subagents --
         self._subagent_tools = self._get_subagent_tools()
         self.subagents.set_default_tools(self._subagent_tools)
@@ -597,6 +637,100 @@ class Agent:
                 logger.info("Injected memory summary (%d conversations)", len(convs))
         except Exception as e:
             logger.debug("Could not inject memory summary: %s", e)
+
+    # ------------------------------------------------------------------
+    # Mode & autonomy configuration
+    # ------------------------------------------------------------------
+
+    def _apply_mode_config(self) -> None:
+        """Apply mode and autonomy settings to the agent.
+
+        Called at the end of setup():
+        - Injects the mode-specific system prompt suffix.
+        - Filters tools for architect mode (read-only).
+        - Applies autonomy-level approval callbacks.
+        - Adjusts max_depth based on autonomy multiplier.
+        """
+        mode = self.config.agent_mode.lower()
+        autonomy = self.config.agent_autonomy.lower()
+
+        # Validate
+        if mode not in MODE_SYSTEM_PROMPTS:
+            logger.warning("Unknown agent mode '%s', defaulting to 'chat'", mode)
+            mode = "chat"
+        if autonomy not in AUTONOMY_CONFIGS:
+            logger.warning("Unknown autonomy level '%s', defaulting to 'ask'", autonomy)
+            autonomy = "ask"
+
+        # 1. Inject mode system prompt suffix
+        suffix = MODE_SYSTEM_PROMPTS[mode]
+        if suffix:
+            self.context.add("system", suffix)
+            logger.info("Mode '%s' system prompt injected", mode)
+
+        # 2. Filter tools for architect mode (read-only)
+        if mode == "architect":
+            self._all_tools = [t for t in self._all_tools if t.name in ARCHITECT_TOOLS]
+            logger.info("Architect mode: tools filtered to %d read-only tools", len(self._all_tools))
+
+        # 3. Apply autonomy-level behaviour
+        aut = AUTONOMY_CONFIGS[autonomy]
+        multiplier = aut["max_depth_multiplier"]
+        self.max_depth = self.config.agent_max_depth * multiplier
+        logger.info("Autonomy '%s': max_depth=%d", autonomy, self.max_depth)
+
+        if aut["auto_approve_files"]:
+            # Bypass interactive file-approval prompt — accept all writes silently
+            self._on_file_approval = lambda path, summary, diff: (True, "")
+            logger.info("Autonomy '%s': file writes auto-approved", autonomy)
+
+        if aut["auto_approve_commands"]:
+            # Bypass interactive command-approval prompt — accept all commands silently
+            self._on_command_approval = lambda cmd: (True, "")
+            # Also update PermissionManager callback so PROMPT-level rules pass through
+            self.permissions.set_approval_callback(
+                lambda cat, desc, target: (True, "")
+            )
+            logger.info("Autonomy '%s': commands auto-approved", autonomy)
+        elif aut["auto_approve_files"] and not aut["auto_approve_commands"]:
+            # Sync PermissionManager for file category only
+            orig_pm_cb = self.permissions._approval_callback
+
+            def _selective_pm_callback(cat: str, desc: str, target: str) -> tuple[bool, str]:
+                if cat == "filesystem":
+                    return True, ""
+                if orig_pm_cb:
+                    return orig_pm_cb(cat, desc, target)
+                return False, "No approval mechanism configured."
+
+            self.permissions.set_approval_callback(_selective_pm_callback)
+
+        # Print mode banner
+        mode_labels = {
+            "chat": "💬 Chat", "code": "💻 Code",
+            "architect": "🏛  Architect", "debug": "🐛 Debug",
+        }
+        aut_labels = {"ask": "🙋 Ask", "auto": "⚡ Auto", "yolo": "🔥 Yolo"}
+        print(f"  Mode: {mode_labels.get(mode, mode)}  |  Autonomy: {aut_labels.get(autonomy, autonomy)}")
+
+    def switch_mode(self, mode: str) -> str:
+        """Switch the agent mode at runtime. Returns a status message."""
+        mode = mode.lower().strip()
+        if mode not in MODE_SYSTEM_PROMPTS:
+            return f"Unknown mode '{mode}'. Valid modes: chat, code, architect, debug"
+        self.config.agent_mode = mode
+        # Re-inject mode prompt and re-filter tools
+        self._apply_mode_config()
+        return f"Mode switched to: {mode}"
+
+    def switch_autonomy(self, autonomy: str) -> str:
+        """Switch the autonomy level at runtime. Returns a status message."""
+        autonomy = autonomy.lower().strip()
+        if autonomy not in AUTONOMY_CONFIGS:
+            return f"Unknown autonomy level '{autonomy}'. Valid levels: ask, auto, yolo"
+        self.config.agent_autonomy = autonomy
+        self._apply_mode_config()
+        return f"Autonomy switched to: {autonomy}"
 
     # ------------------------------------------------------------------
     # Controlled tool subsets for subagents
@@ -657,9 +791,15 @@ class Agent:
         """The main agentic reasoning loop."""
         self.call_depth += 1
         if self.call_depth > self.max_depth:
-            self.call_depth -= 1
+            # Reset depth so subsequent calls work normally
+            self.call_depth = 0
             logger.warning("Max reasoning depth reached (%d)", self.max_depth)
-            return "I've reached the maximum number of reasoning steps. Please ask me to continue or refine your request."
+            return (
+                f"I've reached the maximum number of reasoning steps ({self.max_depth}). "
+                "This usually means I'm stuck in a loop — for example, a tool keeps failing "
+                "and I'm retrying with different approaches. "
+                "Please tell me what you'd like me to do next, or simplify the request."
+            )
 
         logger.debug("LLM call (depth=%d, messages=%d)", self.call_depth, len(self.context.messages))
         llm_start = time.time()
@@ -1077,22 +1217,58 @@ class Agent:
                 except Exception as e:
                     return f"Error resolving path: {e}"
 
-                # Check permissions
-                approved, reason, perm_level = self.permissions.authorize_file_write(str(resolved))
-                self.audit.log_permission_check("filesystem", str(resolved), perm_level.value, approved, reason)
-
-                if not approved:
+                # Audit the permission check (informational only — approval is handled
+                # interactively by PatchTool via _file_approval_handler)
+                perm_level = self.permissions.check_file_write(str(resolved))
+                self.audit.log_permission_check(
+                    "filesystem", str(resolved), perm_level.value,
+                    perm_level != PermissionLevel.DENY, "",
+                )
+                if perm_level == PermissionLevel.DENY:
                     return (
-                        f"[SECURITY] File write denied: '{raw_path}'\n"
-                        f"Reason: {reason}"
+                        f"[SECURITY] File write explicitly denied by policy: '{raw_path}'\n"
+                        f"This path is blocked under all circumstances."
                     )
 
-                # Use PatchTool.propose_patch for full parsing/validation/conflict detection
+                # Use PatchTool.propose_patch — approval prompt is handled via
+                # _file_approval_handler which calls on_file_approval if configured.
                 success, message = self.patch_tool.propose_patch(str(resolved), diff_text)
                 self.audit.log_file_operation(
                     "apply_diff", str(resolved), len(diff_text), success=success,
                     error="" if success else message,
                 )
+
+                # Auto-fallback: if a conflict is detected, try propose_write using the
+                # proposed content already computed inside propose_patch (embedded in message).
+                # This avoids an infinite loop where the AI keeps retrying the same bad patch.
+                if not success and message.startswith("[CONFLICT]"):
+                    from nyx.diff_tool import _apply_unified_diff_to_content, _apply_search_replace_to_content, _SEARCH_MARKER_RE
+                    original_content = ""
+                    if resolved.exists():
+                        try:
+                            original_content = resolved.read_text(encoding="utf-8")
+                        except Exception:
+                            pass
+                    # Attempt to reconstruct proposed content from the diff
+                    proposed_content = None
+                    lines = diff_text.splitlines()
+                    if any(_SEARCH_MARKER_RE.match(l) for l in lines):
+                        proposed_content = _apply_search_replace_to_content(original_content, diff_text)
+                    else:
+                        proposed_content = _apply_unified_diff_to_content(original_content, diff_text)
+
+                    if proposed_content is not None:
+                        logger.info("apply_diff conflict: falling back to write_file for %s", resolved)
+                        fb_success, fb_message = self.patch_tool.propose_write(str(resolved), proposed_content)
+                        self.audit.log_file_operation(
+                            "write_file_fallback", str(resolved), len(proposed_content),
+                            success=fb_success, error="" if fb_success else fb_message,
+                        )
+                        fallback_note = "[auto-fallback from apply_diff] " if fb_success else "[fallback also failed] "
+                        return fallback_note + fb_message
+                    # Could not reconstruct content — return original conflict message
+                    return message
+
                 return message
 
             # -- Rollback file --

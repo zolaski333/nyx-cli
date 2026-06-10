@@ -23,6 +23,87 @@ EXAMPLE_CONFIG_PATH = PROJECT_DIR / "config.example.json"
 # Defaults
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Mode system prompts
+# ---------------------------------------------------------------------------
+
+_CHAT_SUFFIX = ""
+
+_CODE_SUFFIX = """\n\n[MODE: CODE]
+You are an expert software developer. Your primary focus is writing, modifying and refactoring code.
+Guidelines:
+- Prefer apply_diff for modifying existing files (shows a clean diff).
+- Use write_file only for new files or full rewrites.
+- Always read a file before modifying it.
+- Think step-by-step: understand the structure, then make minimal targeted changes.
+- Run tests after each significant change using run_tests.
+- Use search_code to navigate large codebases efficiently."""
+
+_ARCHITECT_SUFFIX = """\n\n[MODE: ARCHITECT — READ ONLY]
+You are a senior software architect. You analyse codebases and produce clear, actionable plans.
+IMPORTANT CONSTRAINTS:
+- You CANNOT modify, create, or delete any file. You have no write tools.
+- Your sole job is to READ, UNDERSTAND and PLAN.
+- Use repo_map to get an overview, then read_file and search_code for details.
+- Produce a structured plan (problem statement, proposed architecture, files to change, risks).
+- Be explicit about which files would need to change and why.
+- Do NOT attempt to apply any changes."""
+
+_DEBUG_SUFFIX = """\n\n[MODE: DEBUG]
+You are an expert debugger. Your focus is finding and fixing bugs, errors, and test failures.
+Guidelines:
+- Start by reading error messages and stack traces carefully.
+- Use search_code to find relevant code paths.
+- Use run_tests to reproduce failures before and after fixes.
+- Apply minimal, surgical fixes — avoid refactoring unrelated code.
+- Explain the root cause of each bug before fixing it.
+- Verify the fix with run_tests after applying it."""
+
+# Maps mode name -> system prompt suffix injected into context
+MODE_SYSTEM_PROMPTS: dict[str, str] = {
+    "chat": _CHAT_SUFFIX,
+    "code": _CODE_SUFFIX,
+    "architect": _ARCHITECT_SUFFIX,
+    "debug": _DEBUG_SUFFIX,
+}
+
+# Tools available in architect mode (read-only)
+ARCHITECT_TOOLS: set[str] = {
+    "read_file", "list_files", "search_code", "repo_map",
+    "web_search", "web_fetch", "memory_recall", "finish",
+}
+
+# ---------------------------------------------------------------------------
+# Autonomy configs
+# ---------------------------------------------------------------------------
+
+# Maps autonomy level -> dict of behaviour overrides
+AUTONOMY_CONFIGS: dict[str, dict[str, Any]] = {
+    "ask": {
+        # Default: prompt for file writes outside sandbox, prompt for dangerous commands
+        "auto_approve_files": False,
+        "auto_approve_commands": False,
+        "max_depth_multiplier": 1,   # × agent_max_depth
+    },
+    "auto": {
+        # Auto-approve file writes, still prompt for dangerous shell commands
+        "auto_approve_files": True,
+        "auto_approve_commands": False,
+        "max_depth_multiplier": 2,
+    },
+    "yolo": {
+        # Auto-approve everything (except hard-DENY rules)
+        "auto_approve_files": True,
+        "auto_approve_commands": True,
+        "max_depth_multiplier": 4,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Default config
+# ---------------------------------------------------------------------------
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "provider": "openrouter",
     "model": "deepseek/deepseek-v4-flash",
@@ -92,6 +173,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enable_history": True,
         "use_git": True,
         "max_rollback_entries": 50,
+    },
+    # -- Agent behaviour --
+    "agent": {
+        "mode": "chat",        # chat | code | architect | debug
+        "autonomy": "ask",     # ask | auto | yolo
+        "max_depth": 50,       # maximum reasoning steps
     },
 }
 
@@ -164,6 +251,10 @@ class Config:
     diff_tool_enable_history: bool = True
     diff_tool_use_git: bool = True
     diff_tool_max_rollback_entries: int = 50
+    # -- Agent behaviour --
+    agent_mode: str = "chat"       # chat | code | architect | debug
+    agent_autonomy: str = "ask"    # ask | auto | yolo
+    agent_max_depth: int = 50
     # -- Raw --
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -221,6 +312,7 @@ class Config:
         cls._flatten_nested(raw, "json_logging", ["enabled", "output_path", "log_to_stderr"])
         cls._flatten_nested(raw, "rate_limiting", ["enabled", "rate", "burst", "max_retries", "base_delay", "max_delay"])
         cls._flatten_nested(raw, "diff_tool", ["require_approval", "show_full_diff", "enable_rollback", "enable_history", "use_git", "max_rollback_entries"])
+        cls._flatten_nested(raw, "agent", ["mode", "autonomy", "max_depth"])
 
         # Store a copy of raw config (not self-referencing)
         raw_copy = dict(raw)
