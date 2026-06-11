@@ -19,15 +19,16 @@
 
 Nyx is an **agentic coding CLI** that runs on **pure Python 3.10+ standard library** — no `pip install`, no `node_modules`, no `cargo`. Clone it and it works instantly.
 
-| Feature | Nyx | Claude Code | Codex CLI | Open Interpreter | Aider | Goose |
-|---------|:---:|:-----------:|:---------:|:----------------:|:-----:|:-----:|
-| Zero dependencies | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ (Go) |
-| MCP native | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
-| Plugin skills | ✅ | ❌ | ❌ | ✅ | ❌ | ✅ |
-| Subagents (sync + parallel) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Web search (no API key) | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
-| Multi-provider | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Open source | ✅ MIT | ❌ | ✅ MIT | ✅ AGPL | ✅ Apache 2.0 | ✅ Apache 2.0 |
+| Feature                     | Nyx   | Claude Code | Codex CLI  | Open Interpreter | Aider        | Goose        |
+| --------------------------- | ----- | ----------- | ---------- | ---------------- | ------------ | ------------ |
+| Zero dependencies           | ✅     | ❌           | ❌          | ❌                | ❌            | ✅            |
+| MCP native                  | ✅     | ✅           | ⚠️ Oui     | ❌                | ❌            | ✅            |
+| Plugin skills               | ✅     | ✅           | ❌          | ✅                | ❌            | ✅            |
+| Subagents (sync + parallel) | ✅     | ✅           | ⚠️ Partiel | ❌                | ❌            | ❌            |
+| Web search (no API key)     | ✅     | ✅           | ✅          | ⚠️ Dépend config | ❌            | ❌            |
+| Multi-provider              | ✅     | ❌           | ⚠️ Partiel | ✅                | ✅            | ✅            |
+| Open source                 | ✅ MIT | ❌           | ✅ MIT      | ✅ AGPL           | ✅ Apache 2.0 | ✅ Apache 2.0 |
+
 
 ---
 
