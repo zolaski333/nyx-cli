@@ -23,7 +23,7 @@ Nyx is an **agentic coding CLI** that runs on **pure Python 3.10+ standard libra
 | --------------------------- | ----- | ----------- | ---------- | ---------------- | ------------ | ------------ |
 | Zero dependencies           | ✅     | ❌           | ❌          | ❌                | ❌            | ✅            |
 | MCP native                  | ✅     | ✅           | ⚠️ Oui     | ❌                | ❌            | ✅            |
-| Plugin skills               | ✅     | ✅           | ❌          | ✅                | ❌            | ✅            |
+| Plugin skills               | ✅     | ✅           | ✅          | ✅                | ❌            | ✅            |
 | Subagents (sync + parallel) | ✅     | ✅           | ✅          | ❌                | ❌            | ❌            |
 | Web search (no API key)     | ✅     | ✅           | ✅          | ⚠️ Dépend config | ❌            | ❌            |
 | Multi-provider              | ✅     | ❌           | ⚠️ Partiel | ✅                | ✅            | ✅            |
