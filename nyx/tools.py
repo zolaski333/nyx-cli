@@ -1,12 +1,10 @@
 """Central tool registry and execution dispatcher for Nyx."""
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -602,7 +600,6 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
         if name == "apply_diff":
             raw_path = args.get("path", "")
             diff_text = args.get("diff", "")
-            description = args.get("description", "")
 
             try:
                 resolved = context.sandbox.resolve(raw_path, for_write=True)
@@ -644,7 +641,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                         pass
                 proposed_content = None
                 lines = diff_text.splitlines()
-                if any(_SEARCH_MARKER_RE.match(l) for l in lines):
+                if any(_SEARCH_MARKER_RE.match(line) for line in lines):
                     proposed_content = _apply_search_replace_to_content(original_content, diff_text)
                 else:
                     proposed_content = _apply_unified_diff_to_content(original_content, diff_text)
@@ -667,7 +664,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             raw_path = args.get("path", "")
             try:
                 resolved = context.sandbox.resolve(raw_path, for_write=True)
-            except PathTraversalError as e:
+            except PathTraversalError:
                 return f"[SECURITY] Path traversal blocked: {raw_path}"
             except Exception as e:
                 return f"Error resolving path: {e}"

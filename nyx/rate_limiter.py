@@ -12,7 +12,6 @@ import logging
 import random
 import threading
 import time
-from collections import deque
 from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -162,7 +161,7 @@ def retry_with_backoff(
             else:
                 logger.error("All %d retries exhausted: %s", max_retries, e)
                 raise
-        except Exception as e:
+        except Exception:
             # Non-retryable exception — raise immediately
             raise
 

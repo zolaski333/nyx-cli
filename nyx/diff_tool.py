@@ -20,14 +20,12 @@ import difflib
 import enum
 import hashlib
 import logging
-import os
 import re
-import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -1157,7 +1155,7 @@ class PatchTool:
         # Validate syntax
         syntax_errors = validate_patch_syntax(diff_text)
         if syntax_errors:
-            return False, f"Patch syntax errors:\n" + "\n".join(
+            return False, "Patch syntax errors:\n" + "\n".join(
                 f"  - {e}" for e in syntax_errors
             )
 
@@ -1357,7 +1355,7 @@ def _apply_unified_diff_to_content(original: str, diff_text: str) -> str | None:
         m = _HUNK_HEADER_RE.match(line)
         if m:
             old_start = int(m.group(1))
-            old_count = int(m.group(2)) if m.group(2) else 1
+            int(m.group(2)) if m.group(2) else 1
 
             # Copy lines before this hunk
             while orig_idx < old_start - 1 and orig_idx < len(original_lines):

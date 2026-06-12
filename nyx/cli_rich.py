@@ -7,8 +7,6 @@ Falls back gracefully to the basic CLI if Rich is not installed.
 from __future__ import annotations
 
 import os
-import sys
-import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,7 +58,7 @@ def welcome_panel(config: Config, tool_count: int) -> Any:
     if not RICH_AVAILABLE:
         return ""
 
-    console = get_console()
+    get_console()
     grid = Table.grid(padding=(0, 2))
     grid.add_column()
     grid.add_column()
@@ -337,11 +335,11 @@ def _make_rich_approval_handler(console) -> Callable[[str], tuple[bool, str]]:
     def handle_approval(command: str) -> tuple[bool, str]:
         console.print("\n[bold yellow]⚠️  SECURITY[/bold yellow] The AI wants to execute a potentially dangerous command:")
         console.print(f"  [cyan]{command}[/cyan]")
-        response = console.input(f"  [bold]Allow?[/bold] (y/n): ").strip().lower()
+        response = console.input("  [bold]Allow?[/bold] (y/n): ").strip().lower()
         if response == "y":
             return True, ""
         else:
-            reason = console.input(f"  [dim]Reason for denial:[/dim] ").strip()
+            reason = console.input("  [dim]Reason for denial:[/dim] ").strip()
             return False, reason or "User denied the command."
     return handle_approval
 
@@ -351,9 +349,8 @@ def _make_rich_file_approval_handler(console) -> Callable[[str, str, str], tuple
     def handle_file_approval(path: str, summary: str, diff: str) -> tuple[bool, str]:
         from rich.syntax import Syntax
         from rich.panel import Panel
-        from rich.text import Text
 
-        console.print(f"\n[bold cyan]📝 FILE OPERATION[/bold cyan]")
+        console.print("\n[bold cyan]📝 FILE OPERATION[/bold cyan]")
         console.print(f"  [bold]{summary}[/bold]")
 
         if diff:
@@ -380,11 +377,11 @@ def _make_rich_file_approval_handler(console) -> Callable[[str, str, str], tuple
             if len(diff) > 5000:
                 console.print(f"  [dim](... diff truncated, {len(diff)} total chars)[/dim]")
 
-        response = console.input(f"  [bold]Apply this change?[/bold] (y/n): ").strip().lower()
+        response = console.input("  [bold]Apply this change?[/bold] (y/n): ").strip().lower()
         if response == "y":
             return True, ""
         else:
-            reason = console.input(f"  [dim]Reason for denial:[/dim] ").strip()
+            reason = console.input("  [dim]Reason for denial:[/dim] ").strip()
             return False, reason or "User denied the file change."
     return handle_file_approval
 
@@ -431,7 +428,7 @@ def run_rich_interactive(agent: Agent, config: Config) -> None:
 
     while True:
         try:
-            user_input = console.input(f"\n[bold green]You[/bold green]> ").strip()
+            user_input = console.input("\n[bold green]You[/bold green]> ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[bold green]Bye! 👋[/bold green]")
             agent.memory.save_all()

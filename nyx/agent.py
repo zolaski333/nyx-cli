@@ -10,37 +10,27 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable
 
 from nyx.config import Config, MODE_SYSTEM_PROMPTS, AUTONOMY_CONFIGS, ARCHITECT_TOOLS
-from nyx.providers.base import BaseLLMProvider, LLMResponse, ToolCall, ToolDefinition
+from nyx.providers.base import BaseLLMProvider, ToolCall, ToolDefinition
 from nyx.providers import get_provider
 from nyx.mcp_client import MCPManager
 from nyx.skill_manager import SkillManager
 from nyx.subagent import SubagentManager
-from nyx.async_subagent import AsyncSubagentManager, ParallelTask
+from nyx.async_subagent import AsyncSubagentManager
 from nyx.memory import MemoryManager
-from nyx.web_search import search_web, format_search_results, fetch_page
 from nyx.permissions import PermissionManager, PermissionLevel
-from nyx.sandbox import Sandbox, PathTraversalError
+from nyx.sandbox import Sandbox
 from nyx.audit import AuditTrail
 from nyx.json_logger import JSONLogger
 from nyx.diff_tool import (
-    PatchTool, compute_diff, compute_diff_from_path,
-    ChangeType, PatchInfo, PatchRecord, RollbackEntry,
-    parse_unified_diff, parse_search_replace,
-    validate_patch_syntax, detect_conflicts,
-    format_diff_for_display, get_patch_history,
+    PatchTool,
 )
-from nyx.repo_map import build_repo_map, build_repo_map_short
-from nyx.search_code import search_code as _search_code
-from nyx.test_loop import run_tests as _run_tests
-from nyx.test_loop import auto_correct_loop, format_failures_for_llm, TestFailure
+from nyx.repo_map import build_repo_map_short
 
 logger = logging.getLogger(__name__)
 

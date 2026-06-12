@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from nyx.providers.base import ToolDefinition
@@ -98,7 +97,7 @@ class MCPSession:
             raise RuntimeError(f"MCP server '{self.name}': failed to open pipes.")
 
         # 1. Initialize
-        init_resp = self._request("initialize", {
+        self._request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "nyx", "version": "0.2.0"},

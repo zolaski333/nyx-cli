@@ -1,0 +1,12 @@
+# Nyx Patch Record
+# File: /tmp/tmpdremyhca/newfile.txt
+# Type: modify
+# Time: 2026-06-12 11:11:49
+# Success: True
+# Summary: MODIFY  /tmp/tmpdremyhca/newfile.txt (+1 -0) 1 hunk(s)
+# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781255510_tmp_tmpdremyhca_newfile.txt_521e4918.bak
+
+<<<<<<< SEARCH
+=======
+new content
+>>>>>>> REPLACE

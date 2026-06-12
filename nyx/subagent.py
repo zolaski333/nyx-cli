@@ -8,7 +8,8 @@ Useful for parallel research, code generation, or complex subtasks.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 from typing import Any, Callable, TYPE_CHECKING
 
 from nyx.config import Config
@@ -318,7 +319,7 @@ class Subagent:
                     resolved = Path(path)
                 
                 # Check format of diff
-                from nyx.diff_tool import parse_unified_diff, parse_search_replace, _apply_unified_diff_to_content, _apply_search_replace_to_content
+                from nyx.diff_tool import _apply_unified_diff_to_content, _apply_search_replace_to_content
                 original = ""
                 if resolved.exists():
                     original = resolved.read_text(encoding="utf-8")

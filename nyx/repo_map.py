@@ -9,10 +9,10 @@ Provides a structured overview of the current repository:
 """
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -317,7 +317,6 @@ def _get_project_language(root: Path) -> str:
 
 def _format_func(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Format a function or method signature including async, decorators, and arguments."""
-    import ast
     is_async = isinstance(node, ast.AsyncFunctionDef)
     decorators = []
     for dec in node.decorator_list:
@@ -339,7 +338,6 @@ def _format_func(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 
 def _format_class(node: ast.ClassDef) -> str:
     """Format a class definition including its base classes (inheritance)."""
-    import ast
     bases = []
     for base in node.bases:
         try:
@@ -355,7 +353,6 @@ def _get_ast_symbols(root: Path, max_files: int = 15) -> str:
 
     Returns a formatted string containing the semantic structure of the code.
     """
-    import ast
     ignored_dirs = {
         ".git", ".venv", "node_modules", ".nyx", "__pycache__",
         ".pytest_cache", ".nyx_memory", "build", "dist", "nyx.egg-info",
@@ -439,13 +436,13 @@ def build_repo_map(root: str | Path | None = None) -> str:
     parts.append(f"📍 Path: {root}")
 
     # -- Directory tree --
-    parts.append(f"\n📂 Directory Structure:")
+    parts.append("\n📂 Directory Structure:")
     parts.append(_get_directory_tree(root))
 
     # -- Important files --
     important = _find_files_by_patterns(root, IMPORTANT_FILE_PATTERNS)
     if important:
-        parts.append(f"\n⭐ Important Files:")
+        parts.append("\n⭐ Important Files:")
         for f in important:
             try:
                 rel = f.relative_to(root)
@@ -456,7 +453,7 @@ def build_repo_map(root: str | Path | None = None) -> str:
     # -- Git status --
     git_info = _get_git_status(root)
     if git_info["branch"]:
-        parts.append(f"\n🌿 Git Status:")
+        parts.append("\n🌿 Git Status:")
         parts.append(f"  Branch: {git_info['branch']}")
         if git_info["last_commit"]:
             parts.append(f"  Last commit: {git_info['last_commit']}")
@@ -474,7 +471,7 @@ def build_repo_map(root: str | Path | None = None) -> str:
 
     # -- Test info --
     test_info = _get_test_info(root)
-    parts.append(f"\n🧪 Tests:")
+    parts.append("\n🧪 Tests:")
     parts.append(f"  Framework: {test_info['framework']}")
     if test_info["test_dirs"]:
         parts.append(f"  Test directories: {', '.join(test_info['test_dirs'])}")
@@ -485,7 +482,7 @@ def build_repo_map(root: str | Path | None = None) -> str:
         if len(test_info["test_files"]) > 15:
             parts.append(f"    ... and {len(test_info['test_files']) - 15} more")
     if test_info["available_commands"]:
-        parts.append(f"  Available commands:")
+        parts.append("  Available commands:")
         for cmd in test_info["available_commands"]:
             parts.append(f"    • {cmd}")
 

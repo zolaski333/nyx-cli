@@ -6,13 +6,12 @@ interface for other search providers.
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from nyx.subagent import Subagent, SubagentResult
 from nyx.config import Config

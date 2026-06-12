@@ -61,7 +61,7 @@ class AnthropicProvider(BaseLLMProvider):
             except urllib.error.HTTPError as err:
                 error_body = err.read().decode("utf-8", errors="replace")
                 if err.code == 429 and attempt == 0:
-                    print(f"\n[Rate limit] retrying...")
+                    print("\n[Rate limit] retrying...")
                     continue
                 raise RuntimeError(error_body.strip() or f"HTTP {err.code}: {err.reason}") from err
             except urllib.error.URLError as err:

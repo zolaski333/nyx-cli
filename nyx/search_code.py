@@ -335,8 +335,6 @@ def _search_grep(
     current_match: SearchMatch | None = None
     current_context_before: list[str] = []
     current_context_after: list[str] = []
-    current_file = ""
-    current_line = 0
 
     # Grep -C output format:
     #   file:line:content
@@ -379,8 +377,6 @@ def _search_grep(
                 )
                 current_context_before = []
                 current_context_after = []
-                current_file = path
-                current_line = line_num
                 continue
 
         # Context line: file-N-content
