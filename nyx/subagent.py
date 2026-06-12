@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from nyx.config import Config
 from nyx.providers.base import BaseLLMProvider, ToolCall
 from nyx.providers import get_provider
+
+if TYPE_CHECKING:
+    from nyx.tools import ToolContext
 
 
 @dataclass
@@ -38,6 +41,7 @@ class Subagent:
         temperature: float = 0.5,
         tools: list | None = None,
         tool_executor: Callable[[ToolCall], str] | None = None,
+        context: ToolContext | None = None,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt or (
@@ -50,6 +54,7 @@ class Subagent:
         self.temperature = temperature
         self._tools = tools  # Controlled tool subset (None = no tools)
         self._tool_executor = tool_executor
+        self.context = context
 
     def execute(
         self,
@@ -90,59 +95,93 @@ class Subagent:
         # Use provided tools, or instance tools, or none
         effective_tools = tools if tools is not None else self._tools
 
-        try:
-            response = provider.chat(
-                messages=messages,
-                tools=effective_tools or None,
-                stream=False,
-            )
+        # Maximum depth of tool calls
+        max_steps = 10
+        total_tokens = 0
+        use_anthropic_format = self._config.provider == "anthropic" if self._config else False
 
-            # Handle tool calls recursively (subagent can use its own tools)
-            if response.tool_calls and effective_tools:
-                output_parts: list[str] = []
-                for tc in response.tool_calls:
-                    # Execute the tool call
-                    tool_result = self._execute_tool_call(tc, effective_tools)
-                    output_parts.append(f"[Tool: {tc.name}] {tool_result}")
-                # After tool execution, get final response
-                messages.append({
-                    "role": "assistant",
-                    "content": response.content or "",
-                    "tool_calls": [
-                        {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
-                        for tc in response.tool_calls
-                    ],
-                })
-                for tc in response.tool_calls:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "content": "[Tool executed]",
-                    })
-                final_response = provider.chat(
+        try:
+            for step in range(max_steps):
+                response = provider.chat(
                     messages=messages,
                     tools=effective_tools or None,
                     stream=False,
                 )
-                final_content = final_response.content or "\n".join(output_parts)
-                return SubagentResult(
-                    task=task,
-                    output=final_content,
-                    tokens_used=(
-                        response.usage.get("total_tokens", 0) if response.usage else 0
-                    ) + (
-                        final_response.usage.get("total_tokens", 0) if final_response.usage else 0
-                    ),
-                )
+                
+                if response.usage:
+                    total_tokens += response.usage.get("total_tokens", 0) or response.usage.get("prompt_tokens", 0) + response.usage.get("completion_tokens", 0)
+                
+                # Append assistant response
+                content_str = response.content or ""
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": content_str,
+                }
+                if response.tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
+                        for tc in response.tool_calls
+                    ]
+                messages.append(assistant_msg)
 
+                # If no tool calls, this is the final answer!
+                if not response.tool_calls or not effective_tools:
+                    return SubagentResult(
+                        task=task,
+                        output=response.content,
+                        tokens_used=total_tokens,
+                    )
+
+                # Execute all tool calls in this turn
+                for tc in response.tool_calls:
+                    if self.context:
+                        from nyx.tools import execute_tool
+                        tool_result = execute_tool(tc, self.context)
+                    else:
+                        tool_result = self._execute_tool_call(tc, effective_tools)
+
+                    # Append tool result to messages
+                    if use_anthropic_format:
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tc.id,
+                                    "content": [{"type": "text", "text": tool_result}],
+                                }
+                            ],
+                        })
+                    else:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "content": tool_result,
+                        })
+                
+                # If finish tool was called, break early and return its result
+                finish_calls = [tc for tc in response.tool_calls if tc.name == "finish"]
+                if finish_calls:
+                    finish_args = finish_calls[0].arguments
+                    summary = finish_args.get("summary", "")
+                    result = finish_args.get("result", "")
+                    output_val = f"Summary: {summary}\nResult: {result}" if (summary or result) else (response.content or "Task completed.")
+                    return SubagentResult(
+                        task=task,
+                        output=output_val,
+                        tokens_used=total_tokens,
+                    )
+
+            # If we reached max_steps, return the last response content
             return SubagentResult(
                 task=task,
-                output=response.content,
-                tokens_used=response.usage.get("total_tokens", 0) if response.usage else 0,
+                output=messages[-1].get("content") or "Max reasoning steps reached.",
+                tokens_used=total_tokens,
             )
+
         except Exception as e:
-            return SubagentResult(task=task, output="", error=str(e))
+            return SubagentResult(task=task, output="", error=str(e), tokens_used=total_tokens)
 
     def _execute_tool_call(self, tc, tools: list) -> str:
         """Execute a single tool call for the subagent.
@@ -174,10 +213,20 @@ class Subagent:
                 resolved = Path(project_dir) / path if project_dir else Path(path)
                 if not resolved.exists() or not resolved.is_dir():
                     return f"Directory not found: {path}"
+                from nyx.tools import IGNORED_DIRS
                 if recursive:
-                    files = [str(f.relative_to(resolved)) for f in resolved.rglob("*")]
+                    files = []
+                    for f in resolved.rglob("*"):
+                        rel_parts = f.relative_to(resolved).parts
+                        if any(part in IGNORED_DIRS for part in rel_parts):
+                            continue
+                        files.append(str(f.relative_to(resolved)))
                 else:
-                    files = [str(f.name) for f in resolved.iterdir()]
+                    files = []
+                    for f in resolved.iterdir():
+                        if f.name in IGNORED_DIRS:
+                            continue
+                        files.append(f.name)
                 return "\n".join(sorted(files)) if files else "(empty directory)"
 
             if name == "search_code":
@@ -203,7 +252,7 @@ class Subagent:
 
             if name == "web_fetch":
                 from nyx.web_search import fetch_page
-                return fetch_page(args.get("url", ""))
+                return fetch_page(args.get("url", ""), mode=args.get("mode", "clean"))
 
             if name == "memory_recall":
                 return "[Subagent] Memory recall not available in subagent context."
@@ -215,14 +264,32 @@ class Subagent:
                     return "Empty command."
                 # Resolve directory
                 cwd = self._config.project_dir if self._config and self._config.project_dir else None
+                env = os.environ.copy()
+                search_dir = cwd if cwd else "."
+                bin_dirs = []
+                for venv_name in (".venv", "venv", "env", ".env"):
+                    venv_bin = Path(search_dir) / venv_name / ("Scripts" if os.name == "nt" else "bin")
+                    if venv_bin.exists():
+                        bin_dirs.append(str(venv_bin))
+                        break
+                node_bin = Path(search_dir) / "node_modules" / ".bin"
+                if node_bin.exists():
+                    bin_dirs.append(str(node_bin))
+                if bin_dirs:
+                    env["PATH"] = os.pathsep.join(bin_dirs) + os.pathsep + env.get("PATH", "")
+
                 proc = subprocess.run(
-                    command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=cwd
+                    command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env
                 )
                 out = proc.stdout or ""
                 err = proc.stderr or ""
+                from nyx.tools import truncate_output
                 if proc.returncode != 0:
-                    return f"Exit code: {proc.returncode}\nstdout:\n{out[:2000]}\nstderr:\n{err[:1000]}"
-                return out[:3000] or "(no output)"
+                    trunc_out = truncate_output(out, max_lines=200, head_lines=50, tail_lines=100)
+                    trunc_err = truncate_output(err, max_lines=200, head_lines=50, tail_lines=100)
+                    return f"Exit code: {proc.returncode}\nstdout:\n{trunc_out}\nstderr:\n{trunc_err}"
+                trunc_out = truncate_output(out, max_lines=200, head_lines=50, tail_lines=100)
+                return trunc_out or "(no output)"
 
             if name == "write_file":
                 path = args.get("path", "")
@@ -312,6 +379,7 @@ class SubagentManager:
         self._default_tools: list | None = None  # Controlled tool subset
         self._tool_executor: Callable[[ToolCall], str] | None = None
         self._progress_callback: Callable[[str, int, int], None] | None = None
+        self._context: ToolContext | None = None
 
     def set_progress_callback(self, callback: Callable[[str, int, int], None] | None) -> None:
         """Set a callback for progress updates: (label, current, total)."""
@@ -326,6 +394,10 @@ class SubagentManager:
         self._tool_executor = executor
         for agent in self._subagents.values():
             agent._tool_executor = executor
+
+    def set_context(self, context: ToolContext | None) -> None:
+        """Set the tool execution context for all subagents spawned by this manager."""
+        self._context = context
 
     def spawn(
         self,
@@ -358,6 +430,7 @@ class SubagentManager:
             temperature=temperature,
             tools=effective_tools,
             tool_executor=self._tool_executor,
+            context=self._context,
         )
         self._subagents[name] = agent
         return agent

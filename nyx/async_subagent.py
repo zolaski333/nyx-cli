@@ -9,11 +9,14 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from nyx.subagent import Subagent, SubagentResult
 from nyx.config import Config
 from nyx.providers.base import ToolCall
+
+if TYPE_CHECKING:
+    from nyx.tools import ToolContext
 
 
 @dataclass
@@ -62,6 +65,7 @@ class AsyncSubagentManager:
         self._results: dict[str, list[SubagentResult]] = {}
         self._default_tools: list | None = None
         self._tool_executor: Callable[[ToolCall], str] | None = None
+        self._context: ToolContext | None = None
 
     def set_default_tools(self, tools: list | None) -> None:
         """Set the default tool subset for spawned subagents."""
@@ -73,6 +77,11 @@ class AsyncSubagentManager:
         with self._lock:
             for agent in self._agents.values():
                 agent._tool_executor = executor
+
+    def set_context(self, context: ToolContext | None) -> None:
+        """Set the tool execution context for all subagents spawned by this manager."""
+        with self._lock:
+            self._context = context
 
     def spawn(
         self,
@@ -93,6 +102,7 @@ class AsyncSubagentManager:
                 temperature=temperature,
                 tools=self._default_tools,
                 tool_executor=self._tool_executor,
+                context=self._context,
             )
             self._agents[name] = agent
             return agent

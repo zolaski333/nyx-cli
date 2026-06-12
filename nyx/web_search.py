@@ -129,7 +129,7 @@ def _ddg_search(query: str, max_results: int = 5) -> list[SearchResult]:
 # ---------------------------------------------------------------------------
 
 
-def fetch_page(url: str, timeout: int = 15) -> str:
+def fetch_page(url: str, timeout: int = 15, mode: str = "clean") -> str:
     """Fetch and extract text content from a URL."""
     req = urllib.request.Request(
         url,
@@ -148,13 +148,56 @@ def fetch_page(url: str, timeout: int = 15) -> str:
         logger.warning("Failed to fetch %s: %s", url, e)
         return f"Error fetching {url}: {e}"
 
-    # Strip HTML tags
-    text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL)
+    if mode == "clean":
+        # First remove comments
+        html_cleaned = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+        # Strip script and style
+        html_cleaned = re.sub(r"<script[^>]*>.*?</script>", "", html_cleaned, flags=re.DOTALL)
+        html_cleaned = re.sub(r"<style[^>]*>.*?</style>", "", html_cleaned, flags=re.DOTALL)
+        
+        # Strip common non-article components
+        html_cleaned = re.sub(r"<header[^>]*>.*?</header>", "", html_cleaned, flags=re.DOTALL)
+        html_cleaned = re.sub(r"<footer[^>]*>.*?</footer>", "", html_cleaned, flags=re.DOTALL)
+        html_cleaned = re.sub(r"<nav[^>]*>.*?</nav>", "", html_cleaned, flags=re.DOTALL)
+        html_cleaned = re.sub(r"<aside[^>]*>.*?</aside>", "", html_cleaned, flags=re.DOTALL)
+        html_cleaned = re.sub(r"<form[^>]*>.*?</form>", "", html_cleaned, flags=re.DOTALL)
+        
+        # Try to find main article content
+        content_matches = []
+        for tag in ["article", "main"]:
+            content_matches.extend(re.findall(rf"<{tag}[^>]*>(.*?)</{tag}>", html_cleaned, flags=re.DOTALL))
+            
+        if not content_matches:
+            # Look for div with class/id containing article, main-content, post-body, etc.
+            div_patterns = [
+                r'<div[^>]*class="[^"]*(?:article|main-content|post-body|entry-content|markdown-body)[^"]*"[^>]*>(.*?)</div>',
+                r'<div[^>]*id="[^"]*(?:article|main-content|post-body|entry-content|markdown-body)[^"]*"[^>]*>(.*?)</div>'
+            ]
+            for pat in div_patterns:
+                content_matches.extend(re.findall(pat, html_cleaned, flags=re.DOTALL))
+                
+        if content_matches:
+            html = "\n".join(content_matches)
+        else:
+            # Fallback to html_cleaned to at least have headers/navigation/footers stripped
+            html = html_cleaned
+
+    # Preserve block structure by inserting newlines before stripping tags
+    text = re.sub(r"<(?:/p|/div|/h\d|br\s*/?|/li|/tr)>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL)
     text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    # Limit to ~8000 chars
-    return text[:8000]
+    
+    # Clean up horizontal spacing, but keep vertical spacing
+    lines = []
+    for line in text.splitlines():
+        cleaned = re.sub(r"[ \t]+", " ", line).strip()
+        if cleaned:
+            lines.append(cleaned)
+            
+    text = "\n\n".join(lines)
+    return text[:10000]
+
 
 
 # ---------------------------------------------------------------------------

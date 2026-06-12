@@ -1,0 +1,13 @@
+# Nyx Patch Record
+# File: /tmp/tmpdfs99vdr/modify.txt
+# Type: modify
+# Time: 2026-06-12 10:59:28
+# Success: True
+# Summary: MODIFY  /tmp/tmpdfs99vdr/modify.txt (+1 -1) 1 hunk(s)
+# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781254768_tmp_tmpdfs99vdr_modify.txt_516ad7b3.bak
+
+<<<<<<< SEARCH
+original content
+=======
+modified content
+>>>>>>> REPLACE

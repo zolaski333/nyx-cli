@@ -107,58 +107,84 @@ def discover_test_commands(root: str | Path | None = None) -> list[str]:
     Returns a list of shell commands to run tests.
     """
     root = Path(root).resolve() if root else Path.cwd().resolve()
+    
+    # Identify indicators
+    has_package_json = (root / "package.json").exists()
+    has_cargo = (root / "Cargo.toml").exists()
+    has_go = (root / "go.mod").exists()
+    
+    # Python indicators
+    pyproject = root / "pyproject.toml"
+    setup_cfg = root / "setup.cfg"
+    pytest_ini = root / "pytest.ini"
+    has_python = (
+        pyproject.exists()
+        or setup_cfg.exists()
+        or pytest_ini.exists()
+        or (root / "requirements.txt").exists()
+        or (root / "setup.py").exists()
+        or any(root.glob("*.py"))
+    )
+
     commands: list[str] = []
     py = _python_executable()
 
-    # 1. pyproject.toml with pytest config
-    pyproject = root / "pyproject.toml"
-    if pyproject.exists():
-        content = pyproject.read_text(encoding="utf-8", errors="ignore")
-        if "[tool.pytest" in content:
-            commands.append(f"{py} -m pytest -v --tb=short 2>&1")
-            commands.append(f"{py} -m pytest -v --tb=long 2>&1")
-
-    # 2. setup.cfg with pytest
-    setup_cfg = root / "setup.cfg"
-    if setup_cfg.exists():
-        content = setup_cfg.read_text(encoding="utf-8", errors="ignore")
-        if "[tool:pytest]" in content or "[pytest]" in content:
-            commands.append(f"{py} -m pytest -v --tb=short 2>&1")
-
-    # 3. pytest.ini
-    if (root / "pytest.ini").exists():
-        commands.append(f"{py} -m pytest -v --tb=short 2>&1")
-
-    # 4. Generic pytest (if pytest is available)
-    commands.append(f"{py} -m pytest -v --tb=short 2>&1")
-
-    # 5. unittest discovery
-    commands.append(f"{py} -m unittest discover -v 2>&1")
-
-    # 6. npm test
-    if (root / "package.json").exists():
+    # Priority 1: JS/TS
+    if has_package_json:
         commands.append("npm test 2>&1")
 
-    # 7. tox
-    if (root / "tox.ini").exists():
-        commands.append("tox 2>&1")
+    # Priority 2: Rust
+    if has_cargo:
+        commands.append("cargo test 2>&1")
 
-    # 8. make test
+    # Priority 3: Go
+    if has_go:
+        commands.append("go test ./... 2>&1")
+
+    # Priority 4: Python configured tests
+    if has_python:
+        if pyproject.exists():
+            content = pyproject.read_text(encoding="utf-8", errors="ignore")
+            if "[tool.pytest" in content:
+                commands.append(f"{py} -m pytest -v --tb=short 2>&1")
+                commands.append(f"{py} -m pytest -v --tb=long 2>&1")
+        if setup_cfg.exists():
+            content = setup_cfg.read_text(encoding="utf-8", errors="ignore")
+            if "[tool:pytest]" in content or "[pytest]" in content:
+                commands.append(f"{py} -m pytest -v --tb=short 2>&1")
+        if pytest_ini.exists():
+            commands.append(f"{py} -m pytest -v --tb=short 2>&1")
+
+        # General python test fallbacks
+        commands.append(f"{py} -m pytest -v --tb=short 2>&1")
+        commands.append(f"{py} -m unittest discover -v 2>&1")
+
+    # Makefile
     makefile = root / "Makefile"
     if makefile.exists():
         content = makefile.read_text(encoding="utf-8", errors="ignore")
         if any(line.startswith("test") for line in content.splitlines()):
             commands.append("make test 2>&1")
 
-    # 9. Cargo test
-    if (root / "Cargo.toml").exists():
-        commands.append("cargo test 2>&1")
+    # Tox
+    if (root / "tox.ini").exists():
+        commands.append("tox 2>&1")
 
-    # 10. Go test
-    if (root / "go.mod").exists():
-        commands.append("go test ./... 2>&1")
+    # Final fallback if absolutely nothing was appended
+    if not commands:
+        commands.append(f"{py} -m pytest -v --tb=short 2>&1")
+        commands.append(f"{py} -m unittest discover -v 2>&1")
+        if (root / "package.json").exists() or not list(root.glob("*.py")):
+            commands.append("npm test 2>&1")
 
-    return commands
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for cmd in commands:
+        if cmd not in seen:
+            seen.add(cmd)
+            deduped.append(cmd)
+    return deduped
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +229,19 @@ def run_tests(
 
     logger.info("Running tests: %s (in %s)", command, root)
 
+    env = os.environ.copy()
+    bin_dirs = []
+    for venv_name in (".venv", "venv", "env", ".env"):
+        venv_bin = Path(root) / venv_name / ("Scripts" if os.name == "nt" else "bin")
+        if venv_bin.exists():
+            bin_dirs.append(str(venv_bin))
+            break
+    node_bin = Path(root) / "node_modules" / ".bin"
+    if node_bin.exists():
+        bin_dirs.append(str(node_bin))
+    if bin_dirs:
+        env["PATH"] = os.pathsep.join(bin_dirs) + os.pathsep + env.get("PATH", "")
+
     try:
         proc = subprocess.run(
             command,
@@ -211,6 +250,7 @@ def run_tests(
             text=True,
             timeout=timeout,
             cwd=str(root),
+            env=env,
         )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
@@ -429,7 +469,7 @@ def _parse_counts(raw_output: str) -> tuple[int, int, int]:
 @dataclass
 class CorrectionResult:
     """Result of a test correction cycle."""
-    success: bool
+    success: bool = False
     iterations: int = 0
     final_result: TestResult | None = None
     corrections: list[str] = field(default_factory=list)

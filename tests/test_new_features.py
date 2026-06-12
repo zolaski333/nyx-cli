@@ -76,6 +76,28 @@ class TestRepoMap:
         result = build_repo_map(PROJECT_ROOT)
         assert "pyproject.toml" in result or "setup.py" in result
 
+    def test_get_ast_symbols_enriched(self):
+        """_get_ast_symbols should extract heritage, signatures, decorators, and async functions."""
+        from nyx.repo_map import _get_ast_symbols
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "dummy.py"
+            file_path.write_text(
+                "class Child(Parent):\n"
+                "    @decorator\n"
+                "    async def method(self, x: int, y=1):\n"
+                "        pass\n"
+                "\n"
+                "@staticmethod\n"
+                "def func(a, b=True):\n"
+                "    pass\n"
+            )
+            result = _get_ast_symbols(Path(tmpdir))
+            assert "Class: Child (Parent)" in result
+            assert "@decorator async method(self, x: int, y=1)" in result
+            assert "@staticmethod func(a, b=True)" in result
+
 
 # =========================================================================
 # Search Code Tests
@@ -369,6 +391,43 @@ class TestSubagentControlledTools:
         tc = ToolCall(id="1", name="nonexistent_tool", arguments={})
         result = agent._execute_tool_call(tc, [])
         assert "Unknown tool" in result
+
+    def test_subagent_multiturn_loop(self):
+        """Subagent should run a multi-turn tool execution loop and pass actual results."""
+        from nyx.providers.base import BaseLLMProvider, LLMResponse, ToolCall
+        
+        class MockSubagentProvider(BaseLLMProvider):
+            def __init__(self):
+                super().__init__(None)
+                self.calls = 0
+            
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return LLMResponse(
+                        content="",
+                        tool_calls=[ToolCall(id="call_x", name="read_file", arguments={"path": "dummy.txt"})],
+                        usage={"total_tokens": 10}
+                    )
+                else:
+                    last_msg = messages[-1]
+                    assert last_msg["role"] == "tool"
+                    assert "mock content" in last_msg["content"]
+                    return LLMResponse(
+                        content="Final Answer based on: " + last_msg["content"],
+                        usage={"total_tokens": 5}
+                    )
+
+        agent = Subagent(name="test_loop", config=self.config)
+        agent._provider = MockSubagentProvider()
+        agent._execute_tool_call = lambda tc, tools: "mock content from dummy.txt"
+        
+        fake_tools = [ToolDefinition(name="read_file", description="Read", parameters={"type": "object", "properties": {}})]
+        
+        result = agent.execute(task="Do task", tools=fake_tools)
+        assert result.error is None
+        assert "Final Answer based on: mock content from dummy.txt" in result.output
+        assert result.tokens_used == 15
 
 
 # =========================================================================

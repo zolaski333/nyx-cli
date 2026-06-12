@@ -357,14 +357,27 @@ def _make_rich_file_approval_handler(console) -> Callable[[str, str, str], tuple
         console.print(f"  [bold]{summary}[/bold]")
 
         if diff:
+            # Determine change type and styling
+            border_style = "cyan"
+            title = "[bold]Changes[/bold]"
+            if "CREATE" in summary:
+                border_style = "green"
+                title = f"[bold green]CREATE: {path}[/bold green]"
+            elif "DELETE" in summary:
+                border_style = "red"
+                title = f"[bold red]DELETE: {path}[/bold red]"
+            elif "MODIFY" in summary or "APPEND" in summary or "Patch" in summary:
+                border_style = "yellow"
+                title = f"[bold yellow]MODIFY: {path}[/bold yellow]"
+
             # Show diff with syntax highlighting
             try:
-                syntax = Syntax(diff[:3000], "diff", theme="monokai", line_numbers=True)
-                console.print(Panel(syntax, title="[bold]Changes[/bold]", border_style="cyan"))
+                syntax = Syntax(diff[:5000], "diff", theme="monokai", line_numbers=True)
+                console.print(Panel(syntax, title=title, border_style=border_style))
             except Exception:
-                console.print(f"  [dim]{diff[:3000]}[/dim]")
+                console.print(f"  [dim]{diff[:5000]}[/dim]")
 
-            if len(diff) > 3000:
+            if len(diff) > 5000:
                 console.print(f"  [dim](... diff truncated, {len(diff)} total chars)[/dim]")
 
         response = console.input(f"  [bold]Apply this change?[/bold] (y/n): ").strip().lower()
@@ -502,12 +515,14 @@ def run_rich_interactive(agent: Agent, config: Config) -> None:
             conv_id = user_input[8:].strip()
             if agent.memory.switch_to(conv_id):
                 conv = agent.memory.current
+                agent.load_conversation_history()
                 console.print(f"[green]Switched to conversation:[/green] {conv.title if conv else conv_id}")
             else:
                 # Try partial match
                 matches = [c for c in agent.memory.conversations.values() if c.id.startswith(conv_id)]
                 if len(matches) == 1:
                     agent.memory.switch_to(matches[0].id)
+                    agent.load_conversation_history()
                     console.print(f"[green]Switched to conversation:[/green] {matches[0].title}")
                 elif len(matches) > 1:
                     console.print("[yellow]Multiple matches — use full ID:[/yellow]")

@@ -837,3 +837,22 @@ class TestEdgeCases:
         assert record.filepath == "test.py"
         assert record.change_type == ChangeType.CREATE
         assert record.success
+
+    def test_fuzzy_find_best_match_whitespace_indentation(self):
+        """_find_best_match should match even if indentation and whitespaces differ slightly."""
+        from nyx.diff_tool import _find_best_match
+        original = [
+            "def my_func(a, b):",
+            "    print('hello')",
+            "    return a + b"
+        ]
+        
+        # Mismatched indentation and spacing
+        search = [
+            "def   my_func(a,   b):",
+            "  print('hello')",
+            "     return a+b"
+        ]
+        
+        match = _find_best_match(original, search)
+        assert match == (0, 3)

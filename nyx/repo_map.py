@@ -315,6 +315,104 @@ def _get_project_language(root: Path) -> str:
     return best_lang
 
 
+def _format_func(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Format a function or method signature including async, decorators, and arguments."""
+    import ast
+    is_async = isinstance(node, ast.AsyncFunctionDef)
+    decorators = []
+    for dec in node.decorator_list:
+        try:
+            decorators.append("@" + ast.unparse(dec))
+        except Exception:
+            pass
+    
+    dec_str = " ".join(decorators) + " " if decorators else ""
+    async_str = "async " if is_async else ""
+    
+    try:
+        args_str = ast.unparse(node.args)
+    except Exception:
+        args_str = ""
+        
+    return f"{dec_str}{async_str}{node.name}({args_str})"
+
+
+def _format_class(node: ast.ClassDef) -> str:
+    """Format a class definition including its base classes (inheritance)."""
+    import ast
+    bases = []
+    for base in node.bases:
+        try:
+            bases.append(ast.unparse(base))
+        except Exception:
+            pass
+    bases_str = f" ({', '.join(bases)})" if bases else ""
+    return f"Class: {node.name}{bases_str}"
+
+
+def _get_ast_symbols(root: Path, max_files: int = 15) -> str:
+    """Scan key Python files and extract class and function structures using AST.
+
+    Returns a formatted string containing the semantic structure of the code.
+    """
+    import ast
+    ignored_dirs = {
+        ".git", ".venv", "node_modules", ".nyx", "__pycache__",
+        ".pytest_cache", ".nyx_memory", "build", "dist", "nyx.egg-info",
+        "venv", "env", ".env", "tests", "test",
+    }
+
+    py_files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ignored_dirs and not d.startswith(".")]
+        for filename in filenames:
+            if filename.endswith(".py") and filename != "__init__.py":
+                py_files.append(Path(dirpath) / filename)
+
+    py_files = sorted(py_files)
+    if not py_files:
+        return ""
+
+    lines = ["\n🧬 Semantic Symbols (AST-based):"]
+    files_to_scan = py_files[:max_files]
+
+    for py_file in files_to_scan:
+        try:
+            rel_path = py_file.relative_to(root)
+        except ValueError:
+            rel_path = py_file.name
+
+        try:
+            content = py_file.read_text(encoding="utf-8", errors="ignore")
+            tree = ast.parse(content, filename=str(py_file))
+
+            file_symbols = []
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.ClassDef):
+                    class_str = f"    - {_format_class(node)}"
+                    file_symbols.append(class_str)
+                    for child in ast.iter_child_nodes(node):
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            if child.name == "__init__" or not child.name.startswith("_"):
+                                file_symbols.append(f"      • {_format_func(child)}")
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if not node.name.startswith("_"):
+                        file_symbols.append(f"    - Function: {_format_func(node)}")
+
+            if file_symbols:
+                lines.append(f"  • {rel_path}:")
+                lines.extend(file_symbols[:15])
+                if len(file_symbols) > 15:
+                    lines.append(f"    ... and {len(file_symbols) - 15} more symbols")
+        except Exception as e:
+            logger.debug("Could not parse AST for %s: %s", py_file, e)
+
+    if len(py_files) > max_files:
+        lines.append(f"  (AST scan limited to first {max_files} of {len(py_files)} Python files)")
+
+    return "\n".join(lines)
+
+
 def build_repo_map(root: str | Path | None = None) -> str:
     """
     Build a complete repository map as a formatted string.
@@ -390,6 +488,11 @@ def build_repo_map(root: str | Path | None = None) -> str:
         parts.append(f"  Available commands:")
         for cmd in test_info["available_commands"]:
             parts.append(f"    • {cmd}")
+
+    # -- AST symbols --
+    ast_symbols = _get_ast_symbols(root)
+    if ast_symbols:
+        parts.append(ast_symbols)
 
     parts.append("\n" + "=" * 60)
     return "\n".join(parts)

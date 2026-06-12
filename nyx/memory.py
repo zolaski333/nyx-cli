@@ -375,7 +375,10 @@ class MemoryManager:
             running_tokens += entry.token_count
 
         for entry in selected:
-            messages.append({"role": entry.role, "content": entry.content})
+            role = entry.role
+            if role == "memory":
+                role = "system"
+            messages.append({"role": role, "content": entry.content})
 
         return messages
 

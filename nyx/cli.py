@@ -617,12 +617,14 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
             conv_id = user_input[8:].strip()
             if agent.memory.switch_to(conv_id):
                 conv = agent.memory.current
+                agent.load_conversation_history()
                 print(f"{c('Switched to conversation:', GREEN)} {conv.title if conv else conv_id}")
             else:
                 # Try partial match
                 matches = [c for c in agent.memory.conversations.values() if c.id.startswith(conv_id)]
                 if len(matches) == 1:
                     agent.memory.switch_to(matches[0].id)
+                    agent.load_conversation_history()
                     print(f"{c('Switched to conversation:', GREEN)} {matches[0].title}")
                 elif len(matches) > 1:
                     print(f"{c('Multiple matches — use full ID:', YELLOW)}")
@@ -1012,6 +1014,9 @@ def main() -> None:
     # Set system prompt
     if config.system_prompt:
         agent.context.add("system", config.system_prompt)
+
+    # Load conversation history from active session
+    agent.load_conversation_history()
 
     try:
         if args.json:

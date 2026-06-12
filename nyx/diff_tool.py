@@ -1443,6 +1443,54 @@ def format_diff_for_display(
 # ---------------------------------------------------------------------------
 
 
+def _normalize_line(line: str) -> str:
+    """Normalize a line by stripping whitespace and compressing internal spaces."""
+    return re.sub(r'\s+', ' ', line.strip())
+
+
+def _find_best_match(original_lines: list[str], search_lines: list[str], threshold: float = 0.6) -> tuple[int, int] | None:
+    """Find the best match of search_lines in original_lines using SequenceMatcher.
+
+    Returns (start_idx, end_idx) of the match in original_lines, or None if no match passes threshold.
+    """
+    if not search_lines:
+        return None
+
+    n_search = len(search_lines)
+    n_orig = len(original_lines)
+
+    if n_orig < n_search:
+        return None
+
+    best_ratio = 0.0
+    best_range = None
+
+    # Allow window sizes from max(1, n_search - 2) to n_search + 2
+    min_w = max(1, n_search - 2)
+    max_w = min(n_orig, n_search + 2)
+
+    search_norm = "\n".join(_normalize_line(l) for l in search_lines).strip()
+
+    for w in range(min_w, max_w + 1):
+        for i in range(n_orig - w + 1):
+            slice_lines = original_lines[i:i+w]
+            slice_norm = "\n".join(_normalize_line(l) for l in slice_lines).strip()
+
+            if slice_norm == search_norm:
+                return i, i + w
+
+            matcher = difflib.SequenceMatcher(None, slice_norm, search_norm)
+            ratio = matcher.ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_range = (i, i + w)
+
+    if best_ratio >= threshold and best_range is not None:
+        return best_range
+
+    return None
+
+
 def _apply_search_replace_to_content(original: str, patch_text: str) -> str | None:
     """Apply SEARCH/REPLACE blocks to original content.
 
@@ -1456,6 +1504,7 @@ def _apply_search_replace_to_content(original: str, patch_text: str) -> str | No
     result = original
     lines = patch_text.splitlines()
     i = 0
+    had_trailing_newline = original.endswith("\n") or original.endswith("\r\n")
 
     while i < len(lines):
         if _SEARCH_MARKER_RE.match(lines[i]):
@@ -1488,14 +1537,25 @@ def _apply_search_replace_to_content(original: str, patch_text: str) -> str | No
 
             i += 1  # Skip >>>>>>> REPLACE
 
-            search_text = "\n".join(search_lines)
-            replace_text = "\n".join(replace_lines)
-
-            if search_text not in result:
-                return None  # SEARCH text not found
-
-            result = result.replace(search_text, replace_text, 1)
+            # Try to match fuzzy using sequence matcher
+            original_lines = result.splitlines()
+            match_range = _find_best_match(original_lines, search_lines)
+            if match_range is not None:
+                start_idx, end_idx = match_range
+                new_lines = original_lines[:start_idx] + replace_lines + original_lines[end_idx:]
+                result = "\n".join(new_lines)
+            else:
+                # Fallback to exact search string replacement
+                search_text = "\n".join(search_lines)
+                replace_text = "\n".join(replace_lines)
+                if search_text in result:
+                    result = result.replace(search_text, replace_text, 1)
+                else:
+                    return None  # SEARCH text not found
         else:
             i += 1
+
+    if had_trailing_newline and not (result.endswith("\n") or result.endswith("\r\n")):
+        result += "\n"
 
     return result

@@ -47,6 +47,24 @@ class TestAgentContext:
         ctx.add("user", "hello")
         assert len(ctx) == 1
 
+    def test_load_conversation_history(self):
+        from nyx.memory import MemoryManager
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
+        config = Config(openrouter_api_key="sk-test")
+        agent = Agent(config=config, memory_manager=MemoryManager(memory_dir=tmpdir, auto_summarise=False))
+        agent.memory.add_entry("user", "Hello from memory")
+        agent.memory.add_entry("assistant", "Hi there")
+        
+        agent.load_conversation_history()
+        
+        user_msgs = [m for m in agent.context.messages if m["role"] == "user"]
+        assistant_msgs = [m for m in agent.context.messages if m["role"] == "assistant"]
+        assert len(user_msgs) == 1
+        assert user_msgs[0]["content"] == "Hello from memory"
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "Hi there"
+
 
 class TestAgentSandbox:
     """Test the command sandbox security."""
@@ -134,6 +152,25 @@ class TestAgentSandbox:
         tc = ToolCall(id="8", name="execute_command", arguments={"command": "sudo apt update"})
         result = self.agent._execute_tool(tc)
         assert "denied" in result.lower()
+
+    def test_execute_command_virtualenv_path(self):
+        """execute_command should prepend local venv/bin to PATH."""
+        import tempfile
+        import os
+        from pathlib import Path
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                bin_dir = Path(tmpdir) / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+                bin_dir.mkdir(parents=True)
+                config = Config(openrouter_api_key="sk-test", project_dir=tmpdir)
+                agent = Agent(config=config)
+                agent.sandbox.set_root(tmpdir)
+                tc = ToolCall(id="1", name="execute_command", arguments={"command": "echo $PATH" if os.name != "nt" else "echo %PATH%"})
+                result = agent._execute_tool(tc)
+                assert str(bin_dir) in result
+        finally:
+            os.chdir(old_cwd)
 
 
 class TestAgentBuiltinTools:
@@ -305,3 +342,39 @@ class TestAgentBuiltinTools:
         # System path should be PROMPT
         level = self.agent.permissions.check_file_write("/etc/config.conf")
         assert level.value in ("prompt", "deny")
+
+    def test_read_file_pagination(self):
+        """read_file should support start_line and end_line parameters."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = f"{tmpdir}/pagination.txt"
+            with open(filepath, "w") as f:
+                f.write("line1\nline2\nline3\nline4\nline5\n")
+            
+            # Read first 2 lines
+            tc = ToolCall(id="1", name="read_file", arguments={"path": filepath, "start_line": 1, "end_line": 2})
+            result = self.agent._execute_tool(tc)
+            assert "line1\nline2" in result
+            assert "line3" not in result
+            assert "Lines 1 to 2 of 5" in result
+
+            # Read middle lines
+            tc = ToolCall(id="2", name="read_file", arguments={"path": filepath, "start_line": 3, "end_line": 4})
+            result = self.agent._execute_tool(tc)
+            assert "line3\nline4" in result
+            assert "line2" not in result
+            assert "Lines 3 to 4 of 5" in result
+
+    def test_execute_command_smart_truncation(self):
+        """execute_command should truncate long outputs intelligently."""
+        # We can construct a command that outputs 250 lines
+        cmd = "python3 -c 'for i in range(1, 251): print(f\"line {i}\")'"
+        tc = ToolCall(id="1", name="execute_command", arguments={"command": cmd})
+        result = self.agent._execute_tool(tc)
+        
+        # Output should be truncated
+        assert "TRUNCATED" in result
+        assert "line 1\n" in result
+        assert "line 250\n" in result or "line 250" in result
+        # Check that the middle is indeed truncated (line 100 should not be there)
+        assert "line 100\n" not in result
