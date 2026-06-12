@@ -1,0 +1,13 @@
+# Nyx Patch Record
+# File: /tmp/tmp1rw8d1py/modify.txt
+# Type: modify
+# Time: 2026-06-12 11:07:56
+# Success: True
+# Summary: MODIFY  /tmp/tmp1rw8d1py/modify.txt (+1 -1) 1 hunk(s)
+# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781255276_tmp_tmp1rw8d1py_modify.txt_516ad7b3.bak
+
+<<<<<<< SEARCH
+original content
+=======
+modified content
+>>>>>>> REPLACE
