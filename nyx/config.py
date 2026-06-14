@@ -132,6 +132,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "auto_chdir": True,
         "allow_paths": [],
         "deny_paths": [],
+        "use_docker": False,
+        "docker_image": "python:3.11-slim-buster",
     },
     # -- Permissions --
     "permissions": {
@@ -230,6 +232,8 @@ class Config:
     sandbox_auto_chdir: bool = True
     sandbox_allow_paths: list[str] = field(default_factory=list)
     sandbox_deny_paths: list[str] = field(default_factory=list)
+    sandbox_use_docker: bool = False
+    sandbox_docker_image: str = "python:3.11-slim-buster"
     # -- Permissions --
     permissions_config: dict[str, Any] = field(default_factory=dict)
     # -- Audit trail --
@@ -307,7 +311,7 @@ class Config:
             )
 
         # 5. Flatten nested config sections into top-level fields
-        cls._flatten_nested(raw, "sandbox", ["enabled", "auto_chdir", "allow_paths", "deny_paths"])
+        cls._flatten_nested(raw, "sandbox", ["enabled", "auto_chdir", "allow_paths", "deny_paths", "use_docker", "docker_image"])
         cls._flatten_nested(raw, "permissions", ["shell", "filesystem"])
         cls._flatten_nested(raw, "audit", ["enabled", "output_dir", "max_file_size_mb"])
         cls._flatten_nested(raw, "json_logging", ["enabled", "output_path", "log_to_stderr"])

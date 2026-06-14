@@ -227,6 +227,21 @@ def run_tests(
 
     command = _normalise_python_command(command)
 
+    try:
+        from nyx.config import Config
+        config = Config.load()
+        if config.sandbox_use_docker:
+            import shutil
+            if shutil.which("docker") or shutil.which("podman"):
+                docker_bin = "docker" if shutil.which("docker") else "podman"
+                escaped = command.replace("'", "'\\''")
+                quoted_cmd = f"'{escaped}'"
+                escaped_root = str(root).replace("'", "'\\''")
+                command = f"{docker_bin} run --rm -v '{escaped_root}':/workspace -w /workspace {config.sandbox_docker_image} sh -c {quoted_cmd}"
+                logger.info("Running tests in Docker sandbox: %s", command)
+    except Exception as e:
+        logger.debug("Failed to check Docker config: %s", e)
+
     logger.info("Running tests: %s (in %s)", command, root)
 
     env = os.environ.copy()
@@ -477,7 +492,7 @@ class CorrectionResult:
 
 
 def auto_correct_loop(
-    fix_function: Callable[[list[TestFailure], str], str],
+    fix_function: Callable,
     root: str | Path | None = None,
     test_command: str | None = None,
     max_iterations: int = 5,
@@ -487,7 +502,7 @@ def auto_correct_loop(
     Run a test → fix → re-run loop until all tests pass or max iterations reached.
 
     Args:
-        fix_function: A callable that receives (failures, raw_output) and
+        fix_function: A callable that receives (failures, raw_output, [history]) and
                       returns a description of what was fixed (empty string = no fix).
         root: Project root directory.
         test_command: Specific test command. If None, auto-discover.
@@ -499,6 +514,7 @@ def auto_correct_loop(
     """
     root = Path(root).resolve() if root else Path.cwd().resolve()
     result = CorrectionResult()
+    history: list[dict] = []
 
     for iteration in range(1, max_iterations + 1):
         logger.info("Test iteration %d/%d", iteration, max_iterations)
@@ -513,20 +529,38 @@ def auto_correct_loop(
             logger.info("All tests passed after %d iterations!", iteration)
             return result
 
+        # Record failure history from previous iteration if corrections were applied
+        if iteration > 1 and result.corrections:
+            prev_correction = result.corrections[-1]
+            failure_summaries = [f.summary() for f in test_result.failures]
+            history.append({
+                "iteration": iteration - 1,
+                "correction": prev_correction,
+                "failure_summary": "; ".join(failure_summaries) if failure_summaries else "Unknown test failure"
+            })
+
         if not test_result.failures:
             result.errors.append(
                 f"Iteration {iteration}: Tests failed but no parseable failures found."
             )
             # Try raw output anyway
-            fix_desc = fix_function([], test_result.raw_output)
+            try:
+                fix_desc = fix_function([], test_result.raw_output, history)
+            except TypeError:
+                fix_desc = fix_function([], test_result.raw_output)
+
             if fix_desc:
                 result.corrections.append(f"Iteration {iteration}: {fix_desc}")
             else:
                 break
             continue
 
-        # Call fix function with failures
-        fix_desc = fix_function(test_result.failures, test_result.raw_output)
+        # Call fix function with failures, raw_output, and history
+        try:
+            fix_desc = fix_function(test_result.failures, test_result.raw_output, history)
+        except TypeError:
+            fix_desc = fix_function(test_result.failures, test_result.raw_output)
+
         if fix_desc:
             result.corrections.append(f"Iteration {iteration}: {fix_desc}")
         else:

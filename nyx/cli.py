@@ -785,7 +785,14 @@ def _handle_config_command(argv: list[str]) -> int:
             "permissions": DEFAULT_CONFIG["permissions"],
             "audit": DEFAULT_CONFIG["audit"],
             "diff_tool": DEFAULT_CONFIG["diff_tool"],
+            "mcp_servers": {},
         }
+        if sys.stdin.isatty():
+            try:
+                from nyx.mcp_discovery import run_interactive_discovery
+                run_interactive_discovery(Path.cwd(), initial)
+            except Exception as e:
+                print(f"MCP discovery skipped: {e}")
         _write_config_file(path, initial)
         print(f"Created config: {path}")
         print("Set your API key via OPENROUTER_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY.")
@@ -953,6 +960,19 @@ def main() -> None:
     # Load config
     try:
         config = Config.load(args.config if args.config else None)
+        # Run auto-discovery interactively at startup if running in interactive mode
+        if not args.prompt and sys.stdin.isatty():
+            try:
+                from nyx.mcp_discovery import run_interactive_discovery
+                config_file_path = args.config if args.config else (_project_config_path() if _project_config_path().exists() else None)
+                raw_config = config.raw or {}
+                updated_raw = run_interactive_discovery(config.project_dir or os.getcwd(), raw_config)
+                if "mcp_servers" in updated_raw and updated_raw["mcp_servers"]:
+                    config.mcp_servers = updated_raw["mcp_servers"]
+                    if config_file_path:
+                        _write_config_file(config_file_path, updated_raw)
+            except Exception as e:
+                logger.debug("Failed to run interactive MCP auto-discovery: %s", e)
     except ConfigError as e:
         print(f"{c(f'Configuration error: {e}', ERROR_COLOR)}", file=sys.stderr)
         sys.exit(1)

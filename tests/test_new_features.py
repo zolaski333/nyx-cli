@@ -18,6 +18,7 @@ from nyx.test_loop import (
     format_failures_for_llm,
     _parse_failures,
     _parse_counts,
+    auto_correct_loop,
 )
 from nyx.subagent import Subagent, SubagentManager, SubagentResult
 from nyx.agent import Agent, AgentContext
@@ -280,6 +281,38 @@ FAILED tests/test_memory.py::test_save_and_load - KeyError: 'missing_key'
         assert "test.py" in s
         assert "ValueError" in s
         assert "bad value" in s
+
+    def test_auto_correct_loop_history(self):
+        """auto_correct_loop should build and pass corrective history to the fix function on subsequent attempts."""
+        history_calls = []
+
+        def mock_fix(failures, raw_output, history=None):
+            if history is not None:
+                history_calls.append(list(history))
+            return f"applied fix for {len(failures)} failures"
+
+        fail_cmd = 'python3 -c "import sys; print(\'FAILED test_fail.py::test_f - AssertionError: expected failure\'); sys.exit(1)"'
+        
+        correction = auto_correct_loop(
+            fix_function=mock_fix,
+            root=PROJECT_ROOT,
+            test_command=fail_cmd,
+            max_iterations=3,
+        )
+        
+        assert correction.iterations == 3
+        assert not correction.success
+        assert len(correction.corrections) == 3
+        
+        # It should record history for iterations 2 and 3
+        assert len(history_calls) >= 3
+        assert len(history_calls[1]) == 1
+        assert history_calls[1][0]["iteration"] == 1
+        assert "applied fix for 1 failures" in history_calls[1][0]["correction"]
+        assert "expected failure" in history_calls[1][0]["failure_summary"]
+
+        assert len(history_calls[2]) == 2
+        assert history_calls[2][1]["iteration"] == 2
 
 
 # =========================================================================
@@ -841,3 +874,112 @@ def _get_builtin_tools_static():
 
 # Patch the Agent class for testing
 Agent._get_tools_static = staticmethod(_get_builtin_tools_static)
+
+
+class TestStaticAnalysis:
+    """Test the static dependency indexing and symbol reference finding."""
+
+    def test_index_dependencies(self):
+        """Should build a dependency graph and write to repo_graph.json."""
+        import tempfile
+        import json
+        from pathlib import Path
+        from nyx.repo_map import index_dependencies
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            # Create a py file importing os
+            py_file = tmp_root / "test_dep.py"
+            py_file.write_text("import sys\nfrom pathlib import Path\n")
+            
+            # Create a JS file with import/require
+            js_file = tmp_root / "test_dep.js"
+            js_file.write_text("import React from 'react';\nconst fs = require('fs');\n")
+
+            graph = index_dependencies(tmp_root)
+            
+            # Assert they parsed correctly
+            assert "test_dep.py" in graph
+            assert "sys" in graph["test_dep.py"]
+            assert "pathlib" in graph["test_dep.py"]
+            
+            assert "test_dep.js" in graph
+            assert "react" in graph["test_dep.js"]
+            assert "fs" in graph["test_dep.js"]
+
+            # Assert file was written
+            graph_file = tmp_root / ".nyx" / "repo_graph.json"
+            assert graph_file.exists()
+            data = json.loads(graph_file.read_text(encoding="utf-8"))
+            assert "test_dep.py" in data
+
+    def test_find_references_tool(self):
+        """find_references tool should find occurrences of a symbol with word boundaries."""
+        import tempfile
+        from pathlib import Path
+        from nyx.agent import Agent
+        from nyx.providers.base import ToolCall
+        from nyx.config import Config
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            src_file = tmp_root / "source.py"
+            src_file.write_text("my_special_symbol = 42\nprint(my_special_symbol)\n# my_special_symbol_extra shouldn't match\n")
+            
+            # Set up agent with config pointing to this project root
+            config = Config(openrouter_api_key="sk-test", project_dir=str(tmp_root))
+            agent = Agent(config=config)
+            
+            tc = ToolCall(id="1", name="find_references", arguments={"symbol_name": "my_special_symbol"})
+            result = agent._execute_tool(tc)
+            
+            # Should match the first two lines, not the third
+            assert "source.py:1:" in result
+            assert "source.py:2:" in result
+            assert "source.py:3:" not in result
+            assert "my_special_symbol_extra" not in result
+
+
+class TestMCPDiscovery:
+    """Test the MCP Auto-Discovery scanning and interactive prompts."""
+
+    def test_discover_mcp_servers(self):
+        """Should detect git and sqlite signatures."""
+        import tempfile
+        from pathlib import Path
+        from nyx.mcp_discovery import discover_mcp_servers
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            # Create a mock git folder
+            (tmp_root / ".git").mkdir()
+            # Create a mock sqlite file
+            (tmp_root / "my_database.db").touch()
+
+            discovered = discover_mcp_servers(tmp_root)
+            
+            assert "git" in discovered
+            assert "sqlite" in discovered
+            assert "@modelcontextprotocol/server-git" in discovered["git"]["args"]
+            assert "my_database.db" in discovered["sqlite"]["args"][-1]
+
+    def test_run_interactive_discovery(self, monkeypatch):
+        """Should prompt user and add server configurations to the config dictionary if accepted."""
+        import tempfile
+        from pathlib import Path
+        from nyx.mcp_discovery import run_interactive_discovery
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            (tmp_root / ".git").mkdir()
+
+            config_dict = {"mcp_servers": {}}
+
+            # Mock input to return "y" for git
+            monkeypatch.setattr("builtins.input", lambda prompt: "y")
+
+            updated = run_interactive_discovery(tmp_root, config_dict)
+
+            assert "git" in updated["mcp_servers"]
+            assert updated["mcp_servers"]["git"]["command"] == "npx"
+            assert "@modelcontextprotocol/server-git" in updated["mcp_servers"]["git"]["args"]

@@ -297,6 +297,17 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
             "required": [],
         },
     ),
+    ToolDefinition(
+        name="find_references",
+        description="Find all references (calls, imports, instantiations) to a specific symbol (class, function, variable, etc.) across the codebase.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "symbol_name": {"type": "string", "description": "The exact name of the symbol to look up"},
+            },
+            "required": ["symbol_name"],
+        },
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -349,9 +360,89 @@ def is_dangerous_command(command: str) -> bool:
             return True
     return False
 
+def _validate_and_sanitize_external_tool_args(
+    name: str,
+    args: dict[str, Any],
+    context: ToolContext
+) -> tuple[bool, str, dict[str, Any]]:
+    """Validate and sanitize file paths and commands in external tool arguments (MCP and Skills)
+    to enforce Sandbox and Permission rules.
+    """
+    sanitized = dict(args)
+    name_lower = name.lower()
+
+    # Determine if the tool name suggests a write operation
+    is_write_tool = any(w in name_lower for w in [
+        "write", "create", "delete", "remove", "save", "append", 
+        "modify", "patch", "edit", "update", "set", "post", "put"
+    ])
+
+    for key, val in list(sanitized.items()):
+        if not isinstance(val, str):
+            continue
+
+        key_lower = key.lower()
+        
+        # 1. Identify potential file paths
+        is_path_key = any(p in key_lower for p in [
+            "path", "file", "dir", "uri", "folder", "dest", "src", "target", "location"
+        ])
+        
+        if is_path_key and val.strip():
+            # Clean path from potential URI scheme prefix like file://
+            clean_val = val
+            if clean_val.startswith("file://"):
+                clean_val = clean_val[7:]
+            
+            is_write_arg = is_write_tool or any(w in key_lower for w in ["dest", "target", "output"])
+            
+            try:
+                # Check sandbox first
+                if is_write_arg:
+                    resolved = context.sandbox.resolve(clean_val, for_write=True)
+                    # Check write permissions
+                    approved, reason, level = context.permissions.authorize_file_write(str(resolved))
+                else:
+                    resolved = context.sandbox.safe_read_path(clean_val)
+                    # Check read permissions
+                    approved, reason, level = context.permissions.authorize_file_read(str(resolved))
+                
+                if not approved:
+                    return False, f"[SECURITY] Permission denied by policy for path '{clean_val}': {reason}", args
+                
+                # Replace with safe resolved path
+                sanitized[key] = str(resolved)
+                
+            except PathTraversalError:
+                if context.audit:
+                    context.audit.log_security_event("path_traversal_blocked", {
+                        "path": clean_val,
+                        "tool": name,
+                    })
+                return False, f"[SECURITY] Path traversal blocked for path '{clean_val}'", args
+            except Exception as e:
+                return False, f"[SECURITY] Error validating path '{clean_val}': {e}", args
+
+        # 2. Identify potential shell commands
+        is_cmd_key = any(c in key_lower for c in [
+            "command", "cmd", "shell", "exec", "run", "script"
+        ])
+        
+        if is_cmd_key and val.strip():
+            # Check shell permissions
+            approved, reason, level = context.permissions.authorize_shell(val)
+            if not approved:
+                return False, f"[SECURITY] Permission denied for command '{val[:100]}': {reason}", args
+            
+            # Prepare command (wraps with cd sandbox if needed)
+            sanitized[key] = context.sandbox.prepare_command(val)
+
+    return True, "", sanitized
+
 # ---------------------------------------------------------------------------
 # Central tool execution logic
 # ---------------------------------------------------------------------------
+
 
 def execute_tool(tc: ToolCall, context: ToolContext) -> str:
     """Execute a single tool call and return the result as a string."""
@@ -425,24 +516,25 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             query = args.get("query", "")
             if not query:
                 return "Please provide a query to search for."
-            relevant = []
-            for c_id, conv in context.memory.conversations.items():
-                if query.lower() in conv.title.lower():
-                    relevant.append(f"- [{c_id[:8]}] {conv.title} ({len(conv.entries)} messages): {conv.summary[:200]}")
-                if query.lower() in conv.summary.lower():
-                    relevant.append(f"- [{c_id[:8]}] {conv.title} ({len(conv.entries)} messages): {conv.summary[:200]}")
-                for entry in conv.entries:
-                    if query.lower() in entry.content.lower():
-                        c_title = conv.title[:40]
-                        preview = entry.content[:200]
-                        relevant.append(f"- [{c_id[:8]}] {c_title}: {preview}")
-            notes = context.memory._load_notes()
-            for note in notes:
-                if query.lower() in note["content"].lower() or query.lower() in note.get("tags", "").lower():
-                    relevant.append(f"- [NOTE] {note['content'][:200]}")
-            if not relevant:
+
+            memories = context.memory.recall_memories(query, limit=10, config=context.config)
+            if not memories:
                 return f"No relevant memories found for: {query}"
-            return "Relevant memories:\n" + "\n".join(relevant[:10])
+
+            lines = ["Relevant memories:"]
+            for m in memories:
+                score_str = f"[score: {m['score']}]"
+                if m["type"] == "note":
+                    lines.append(f"- [NOTE] {score_str} {m['content'][:250]}")
+                elif m["type"] == "conversation_summary":
+                    title = m["metadata"].get("title", "Untitled")
+                    lines.append(f"- [CONVERSATION SUMMARY] {score_str} in '{title}': {m['content'][:250]}")
+                elif m["type"] == "message":
+                    title = m["metadata"].get("title", "Untitled")
+                    role = m["metadata"].get("role", "user")
+                    lines.append(f"- [MESSAGE] {score_str} in '{title}' ({role}): {m['content'][:250]}")
+            return "\n".join(lines)
+
 
         # -- Shell command execution (with permissions + sandbox) --
         if name == "execute_command":
@@ -799,6 +891,43 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 logger.error("search_code error: %s", e)
                 return f"Error searching code: {e}"
 
+        # -- Find references --
+        if name == "find_references":
+            symbol_name = args.get("symbol_name", "")
+            if not symbol_name:
+                return "Please provide a symbol_name."
+            root = Path(context.config.project_dir).resolve() if context.config.project_dir else Path(".").resolve()
+            try:
+                import re
+                pattern = re.compile(rf"\b{re.escape(symbol_name)}\b")
+                results = []
+                for dirpath, _, filenames in os.walk(root):
+                    dir_parts = Path(dirpath).parts
+                    if any(part.startswith(".") or part in ("node_modules", "venv", "__pycache__", "build", "dist") for part in dir_parts):
+                        continue
+                    for fname in filenames:
+                        fpath = Path(dirpath) / fname
+                        if fpath.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".tar", ".gz", ".pyc", ".db", ".sqlite"):
+                            continue
+                        try:
+                            content = fpath.read_text(encoding="utf-8", errors="ignore")
+                            for i, line in enumerate(content.splitlines(), 1):
+                                if pattern.search(line):
+                                    rel_path = str(fpath.relative_to(root))
+                                    results.append(f"{rel_path}:{i}: {line.strip()}")
+                        except Exception:
+                            continue
+                if not results:
+                    return f"No references found for symbol '{symbol_name}'."
+                total_found = len(results)
+                if total_found > 100:
+                    results = results[:100]
+                    results.append(f"... and {total_found - 100} more references.")
+                return "\n".join(results)
+            except Exception as e:
+                logger.error("find_references error: %s", e)
+                return f"Error finding references: {e}"
+
         # -- Run tests --
         if name == "run_tests":
             command = args.get("command", "")
@@ -834,12 +963,23 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             timeout = args.get("timeout", 120)
             root = Path(context.config.project_dir).resolve() if context.config.project_dir else Path(".").resolve()
 
-            def _fix_with_subagent(failures: list[TestFailure], raw_output: str) -> str:
+            def _fix_with_subagent(failures: list[TestFailure], raw_output: str, history: list[dict] = None) -> str:
                 if not failures and not raw_output:
                     return ""
                 if not context.subagents:
                     return "Subagent manager not available."
                 prompt = format_failures_for_llm(failures, raw_output)
+
+                if history:
+                    prompt += "\n\n--- HIERARCHY OF PREVIOUS ATTEMPTS (DO NOT REPEAT THESE) ---\n"
+                    for attempt in history:
+                        prompt += (
+                            f"- Attempt #{attempt['iteration']}:\n"
+                            f"  Correction made: {attempt['correction']}\n"
+                            f"  Resulting test failure: {attempt['failure_summary']}\n"
+                        )
+                    prompt += "\nAvoid repeating the same corrective modifications. Explore a different logic or check the code context more carefully."
+
                 prompt += (
                     "\n\nAnalyze the test failures above and fix the source code. "
                     "Use read_file to understand the code, then apply_diff to fix it. "
@@ -893,11 +1033,17 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
 
         # -- MCP tools --
         if name.startswith("mcp_") and context.mcp:
-            return context.mcp.call_tool(name, args)
+            ok, err, sanitized_args = _validate_and_sanitize_external_tool_args(name, args, context)
+            if not ok:
+                return err
+            return context.mcp.call_tool(name, sanitized_args)
 
         # -- Skill tools --
         if name.startswith("skill_") and context.skills:
-            return context.skills.execute_skill(name[6:], args)
+            ok, err, sanitized_args = _validate_and_sanitize_external_tool_args(name, args, context)
+            if not ok:
+                return err
+            return context.skills.execute_skill(name[6:], sanitized_args)
 
         logger.warning("Unknown tool called: %s", name)
         return f"Unknown tool: {name}"

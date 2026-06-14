@@ -24,18 +24,25 @@ class AnthropicProvider(BaseLLMProvider):
         timeout = self.config.request_timeout
 
         # Convert messages to Anthropic format
-        system = ""
+        system_blocks = []
         anthropic_messages = []
         for msg in messages:
             if msg["role"] == "system":
-                system += (msg["content"] + "\n")
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    if content:
+                        system_blocks.append({"type": "text", "text": content})
+                elif isinstance(content, list):
+                    for block in content:
+                        system_blocks.append(dict(block))
             else:
                 role = "assistant" if msg["role"] == "assistant" else "user"
                 content = []
-                if isinstance(msg.get("content"), str):
-                    content.append({"type": "text", "text": msg["content"]})
-                elif isinstance(msg.get("content"), list):
-                    content = msg["content"]
+                msg_content = msg.get("content")
+                if isinstance(msg_content, str):
+                    content.append({"type": "text", "text": msg_content})
+                elif isinstance(msg_content, list):
+                    content = msg_content
                 anthropic_messages.append({"role": role, "content": content})
 
         payload: dict[str, Any] = {
@@ -45,10 +52,14 @@ class AnthropicProvider(BaseLLMProvider):
             "temperature": self.config.temperature,
             "stream": stream,
         }
-        if system:
-            payload["system"] = system
+        if system_blocks:
+            system_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+            payload["system"] = system_blocks
         if tools:
-            payload["tools"] = [self._to_anthropic_tool(t) for t in tools]
+            converted_tools = [self._to_anthropic_tool(t) for t in tools]
+            if converted_tools:
+                converted_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            payload["tools"] = converted_tools
 
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")
@@ -72,6 +83,7 @@ class AnthropicProvider(BaseLLMProvider):
         return {
             "x-api-key": self.config.get_api_key(),
             "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31",
             "Content-Type": "application/json",
         }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from nyx.agent import Agent, AgentContext
 from nyx.config import Config
 from nyx.providers.base import ToolCall
+from nyx.sandbox import Sandbox
 
 
 class TestAgentContext:
@@ -171,6 +172,25 @@ class TestAgentSandbox:
                 assert str(bin_dir) in result
         finally:
             os.chdir(old_cwd)
+
+    def test_sandbox_docker_wrapping(self):
+        """Sandbox prepare_command should wrap command in docker run if configured."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Sandbox(
+                project_root=tmpdir,
+                use_docker=True,
+                docker_image="python:3.11-slim-buster",
+            )
+            sandbox.is_docker_available = lambda: True
+            
+            cmd = "python script.py"
+            wrapped = sandbox.prepare_command(cmd)
+            
+            assert "docker run" in wrapped or "podman run" in wrapped
+            assert "python:3.11-slim-buster" in wrapped
+            assert "python script.py" in wrapped
+            assert tmpdir in wrapped
 
 
 class TestAgentBuiltinTools:

@@ -48,16 +48,67 @@ from nyx.tools import BUILTIN_TOOLS, ToolContext, execute_tool
 # ---------------------------------------------------------------------------
 
 
-def _truncate_to_max_tokens(content: str, max_chars: int = 16000) -> str:
-    """Truncate content in the middle if it exceeds max_chars, leaving a marker."""
-    if len(content) <= max_chars:
+def _semantic_code_fold(content: str, max_chars: int) -> str:
+    """Fold code blocks in the middle of a file to preserve signatures and fit max_chars."""
+    lines = content.splitlines()
+    if len(lines) < 80:
+        return _middle_truncate(content, max_chars)
+
+    # Detect coding constructs
+    code_indicators = ("import ", "def ", "class ", "fn ", "struct ", "impl ", "const ", "let ", "function ")
+    is_code = sum(1 for line in lines if any(line.startswith(ind) for ind in code_indicators)) > 3
+
+    if not is_code:
+        return _middle_truncate(content, max_chars)
+
+    keep_head = 50
+    keep_tail = 50
+
+    if len(lines) <= keep_head + keep_tail:
         return content
+
+    head_part = lines[:keep_head]
+    tail_part = lines[-keep_tail:]
+    middle_part = lines[keep_head:-keep_tail]
+
+    folded_lines = []
+    in_fold = False
+
+    for line in middle_part:
+        if line.startswith(("def ", "class ", "function ", "async function ", "export class ")):
+            folded_lines.append(line)
+            comment = "//" if not line.startswith(("def ", "class ")) else "#"
+            folded_lines.append(f"    {comment} ... [CODE FOLDED SEMANTICALLY TO PRESERVE CONTEXT] ...")
+            in_fold = True
+        elif in_fold and (line.startswith((" ", "\t")) or not line.strip()):
+            continue
+        else:
+            in_fold = False
+            folded_lines.append(line)
+
+    reconstructed = "\n".join(head_part + folded_lines + tail_part)
+    if len(reconstructed) <= max_chars:
+        return reconstructed
+
+    return _middle_truncate(content, max_chars)
+
+
+def _middle_truncate(content: str, max_chars: int) -> str:
+    """Fallback standard truncation in the middle."""
     half = max_chars // 2
     header = content[:half]
     footer = content[-half:]
     return (
         f"{header}\n\n... [TRUNCATED {len(content) - max_chars} CHARACTERS TO PRESERVE CONTEXT WINDOW] ...\n\n{footer}"
     )
+
+
+def _truncate_to_max_tokens(content: str, max_chars: int = 16000) -> str:
+    """Truncate content if it exceeds max_chars, using semantic code folding if possible."""
+    if len(content) <= max_chars:
+        return content
+    return _semantic_code_fold(content, max_chars)
+
 
 
 @dataclass
@@ -208,6 +259,8 @@ class Agent:
             allow_paths=config.sandbox_allow_paths,
             deny_paths=config.sandbox_deny_paths,
             auto_chdir=config.sandbox_auto_chdir,
+            use_docker=config.sandbox_use_docker,
+            docker_image=config.sandbox_docker_image,
         )
 
         # Audit trail

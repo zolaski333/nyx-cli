@@ -35,12 +35,16 @@ class Sandbox:
         allow_paths: list[str] | None = None,
         deny_paths: list[str] | None = None,
         auto_chdir: bool = True,
+        use_docker: bool = False,
+        docker_image: str = "python:3.11-slim-buster",
     ):
         self._root: Path | None = None
         self._original_cwd: Path = self._safe_cwd()
         self._auto_chdir = auto_chdir
         self._allow_extra: list[Path] = []
         self._deny_patterns: list[str] = deny_paths or []
+        self.use_docker = use_docker
+        self.docker_image = docker_image
 
         if project_root:
             self.set_root(project_root)
@@ -176,12 +180,26 @@ class Sandbox:
     # Command execution helpers
     # ------------------------------------------------------------------
 
+    def is_docker_available(self) -> bool:
+        """Check if docker or podman is available on the system."""
+        import shutil
+        return bool(shutil.which("docker") or shutil.which("podman"))
+
     def prepare_command(self, command: str) -> str:
         """Prepare a shell command for execution within the sandbox.
 
-        If auto_chdir is enabled and a root is set, wraps the command
+        If use_docker is enabled and docker/podman is available, wraps the command
+        to run inside a Docker container.
+        Otherwise, if auto_chdir is enabled and a root is set, wraps the command
         to ensure it runs in the project root directory.
         """
+        if self.use_docker and self.is_docker_available():
+            import shutil
+            docker_bin = "docker" if shutil.which("docker") else "podman"
+            root_dir = str(self._root) if self._root else os.getcwd()
+            quoted_cmd = shlex_quote(command)
+            return f'{docker_bin} run --rm -v {shlex_quote(root_dir)}:/workspace -w /workspace {self.docker_image} sh -c {quoted_cmd}'
+
         if self._auto_chdir and self._root:
             # Use cd to ensure the command runs in the project root
             # This handles cases where the shell might have a different cwd
@@ -197,6 +215,8 @@ class Sandbox:
             "auto_chdir": self._auto_chdir,
             "allow_paths": [str(p) for p in self._allow_extra],
             "deny_patterns": list(self._deny_patterns),
+            "use_docker": self.use_docker,
+            "docker_image": self.docker_image,
         }
 
 

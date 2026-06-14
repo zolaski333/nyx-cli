@@ -14,13 +14,104 @@ from __future__ import annotations
 import json
 import threading
 import time
+import hashlib
+import math
+import re
+import urllib.request
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from nyx.providers.base import BaseLLMProvider
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MEMORY_DIR = Path(__file__).resolve().parent.parent / ".nyx_memory"
+
+
+# ---------------------------------------------------------------------------
+# Embedding and BM25 Search Utilities (Zero-Dependency)
+# ---------------------------------------------------------------------------
+
+def _get_embedding(text: str, provider: str, api_key: str) -> list[float] | None:
+    """Fetch embeddings from OpenAI or OpenRouter APIs using standard urllib."""
+    if not api_key or provider not in ("openai", "openrouter"):
+        return None
+    url = "https://api.openai.com/v1/embeddings" if provider == "openai" else "https://openrouter.ai/api/v1/embeddings"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    data = {
+        "input": text,
+        "model": "text-embedding-3-small" if provider == "openai" else "openai/text-embedding-3-small"
+    }
+    try:
+        req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=8) as response:
+            res = json.loads(response.read().decode("utf-8"))
+            return res["data"][0]["embedding"]
+    except Exception as e:
+        logger.debug("Failed to get embedding: %s", e)
+        return None
+
+
+def _text_checksum(text: str) -> str:
+    """Compute a stable checksum for embedding caching."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cosine_similarity(v1: list[float], v2: list[float]) -> float:
+    """Calculate the cosine similarity between two vectors."""
+    if len(v1) != len(v2) or not v1:
+        return 0.0
+    dot_product = sum(a * b for a, b in zip(v1, v2))
+    norm_v1 = math.sqrt(sum(a * a for a in v1))
+    norm_v2 = math.sqrt(sum(b * b for b in v2))
+    return dot_product / (norm_v1 * norm_v2) if norm_v1 > 0 and norm_v2 > 0 else 0.0
+
+
+def _tokenize(text: str) -> list[str]:
+    """Tokenize a string into words for lexical search."""
+    return re.findall(r"\w+", text.lower())
+
+
+class BM25:
+    """A lightweight BM25 implementation for local lexical fallback search."""
+    def __init__(self, corpus: list[list[str]], k1: float = 1.5, b: float = 0.75):
+        self.k1 = k1
+        self.b = b
+        self.corpus_size = len(corpus)
+        self.avg_doc_len = sum(len(doc) for doc in corpus) / max(1, self.corpus_size)
+        self.doc_lens = [len(doc) for doc in corpus]
+        self.df = {}
+        for doc in corpus:
+            for term in set(doc):
+                self.df[term] = self.df.get(term, 0) + 1
+        self.idf = {}
+        for term, freq in self.df.items():
+            self.idf[term] = math.log((self.corpus_size - freq + 0.5) / (freq + 0.5) + 1.0)
+        self.doc_term_freqs = []
+        for doc in corpus:
+            tf = {}
+            for term in doc:
+                tf[term] = tf.get(term, 0) + 1
+            self.doc_term_freqs.append(tf)
+
+    def score(self, query: list[str], doc_idx: int) -> float:
+        tf = self.doc_term_freqs[doc_idx]
+        doc_len = self.doc_lens[doc_idx]
+        score = 0.0
+        for term in query:
+            if term not in tf:
+                continue
+            freq = tf[term]
+            num = freq * (self.k1 + 1)
+            den = freq + self.k1 * (1 - self.b + self.b * doc_len / self.avg_doc_len)
+            score += self.idf.get(term, 0.0) * (num / den)
+        return score
+
 
 
 @dataclass
@@ -91,8 +182,18 @@ class Conversation:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimation (4 chars ≈ 1 token)."""
-    return len(text) // 4
+    """Accurate token estimation with tiktoken fallback, default to division by 4 for backwards compatibility."""
+    if not text:
+        return 0
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text, disallowed_special=()))
+    except ImportError:
+        # Backward-compatible default: 4 characters per token
+        return max(1, len(text) // 4) if text else 0
+
+
 
 
 class MemoryManager:
@@ -133,6 +234,11 @@ class MemoryManager:
 
         # Load existing conversations index (lazy — only loads metadata)
         self._load_index()
+
+        # Load embeddings cache
+        self._embeddings_cache_path = self._dir / "embeddings.json"
+        self._embeddings_cache: dict[str, list[float]] = {}
+        self._load_embeddings_cache()
 
         # Create a new conversation if none loaded
         if not self._current_id:
@@ -500,3 +606,133 @@ class MemoryManager:
             conv.total_tokens = 0
             conv.summary = ""
             self._schedule_save(conv.id)
+
+    # ------------------------------------------------------------------
+    # Embeddings Cache & Semantic Recall
+    # ------------------------------------------------------------------
+
+    def _load_embeddings_cache(self) -> None:
+        """Load cached embeddings from disk."""
+        if self._embeddings_cache_path.exists():
+            try:
+                with self._embeddings_cache_path.open("r", encoding="utf-8") as f:
+                    self._embeddings_cache = json.load(f)
+            except Exception:
+                self._embeddings_cache = {}
+
+    def _save_embeddings_cache(self) -> None:
+        """Save cached embeddings to disk."""
+        try:
+            with self._embeddings_cache_path.open("w", encoding="utf-8") as f:
+                json.dump(self._embeddings_cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def recall_memories(self, query: str, limit: int = 10, config: Any = None) -> list[dict[str, Any]]:
+        """Recall relevant past memories using hybrid Semantic Embeddings and BM25 local fallback.
+
+        Each memory is returned as a dict with: type, title, content, score, and metadata.
+        """
+        # 1. Collect all documents from conversations and notes
+        docs = []
+
+        # Load notes
+        notes = self._load_notes()
+        for note in notes:
+            docs.append({
+                "type": "note",
+                "title": f"Saved Note (tags: {note.get('tags', 'none')})",
+                "content": note["content"],
+                "metadata": {"tags": note.get("tags", ""), "timestamp": note.get("timestamp", 0.0)}
+            })
+
+        # Load conversations (lazy-load all)
+        for cid in list(self._conversations.keys()):
+            # Placeholders logic: trigger lazy loading
+            self.conversations
+
+        for cid, conv in self._conversations.items():
+            # Add conversation summary if present
+            if conv.summary:
+                docs.append({
+                    "type": "conversation_summary",
+                    "title": f"Summary: {conv.title}",
+                    "content": conv.summary,
+                    "metadata": {"conv_id": conv.id, "title": conv.title, "updated_at": conv.updated_at}
+                })
+
+            # Add messages
+            for entry in conv.entries:
+                if len(entry.content) > 30:  # ignore very short messages
+                    docs.append({
+                        "type": "message",
+                        "title": f"Message in '{conv.title}' ({entry.role})",
+                        "content": entry.content,
+                        "metadata": {"conv_id": conv.id, "title": conv.title, "role": entry.role, "timestamp": entry.timestamp}
+                    })
+
+        if not docs:
+            return []
+
+        # 2. Try to get embedding for query
+        query_emb = None
+        provider = None
+        api_key = None
+        if config:
+            provider = config.provider
+            api_key = config.get_api_key()
+        elif self._provider:
+            provider = getattr(self._provider, "provider", None) or getattr(self._provider, "name", None)
+            api_key = getattr(self._provider, "api_key", None)
+
+        if provider and api_key:
+            query_emb = _get_embedding(query, provider, api_key)
+
+        # 3. Calculate scores
+        results = []
+        if query_emb:
+            logger.debug("Performing semantic similarity search for query: '%s'", query)
+            dirty_cache = False
+            for doc in docs:
+                txt = doc["content"]
+                chk = _text_checksum(txt)
+                doc_emb = self._embeddings_cache.get(chk)
+                if not doc_emb:
+                    doc_emb = _get_embedding(txt, provider, api_key)
+                    if doc_emb:
+                        self._embeddings_cache[chk] = doc_emb
+                        dirty_cache = True
+
+                if doc_emb:
+                    score = _cosine_similarity(query_emb, doc_emb)
+                else:
+                    score = 0.0
+                results.append((score, doc))
+
+            if dirty_cache:
+                self._save_embeddings_cache()
+        else:
+            logger.debug("Performing BM25 lexical search fallback for query: '%s'", query)
+            corpus = [_tokenize(doc["content"]) for doc in docs]
+            bm25 = BM25(corpus)
+            query_tokens = _tokenize(query)
+            for idx, doc in enumerate(docs):
+                score = bm25.score(query_tokens, idx)
+                results.append((score, doc))
+
+        # Sort by score descending and return
+        results.sort(key=lambda x: x[0], reverse=True)
+
+        min_score = 0.3 if query_emb else 0.01
+
+        return [
+            {
+                "type": doc["type"],
+                "title": doc["title"],
+                "content": doc["content"],
+                "score": round(score, 4),
+                "metadata": doc["metadata"]
+            }
+            for score, doc in results
+            if score >= min_score
+        ][:limit]

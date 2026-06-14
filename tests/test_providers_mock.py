@@ -175,6 +175,7 @@ class MockAnthropicHandler(BaseHTTPRequestHandler):
     """HTTP handler that simulates Anthropic API responses."""
 
     responses: list[dict[str, Any]] = []
+    requests: list[dict[str, Any]] = []
     request_count = 0
     fail_with_status: int | None = None
 
@@ -192,6 +193,7 @@ class MockAnthropicHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length).decode("utf-8")
         req_data = json.loads(body)
+        MockAnthropicHandler.requests.append(req_data)
 
         is_stream = req_data.get("stream", False)
 
@@ -264,6 +266,7 @@ def mock_anthropic_server():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     MockAnthropicHandler.responses = []
+    MockAnthropicHandler.requests = []
     MockAnthropicHandler.request_count = 0
     MockAnthropicHandler.fail_with_status = None
     yield port
@@ -491,6 +494,36 @@ class TestAnthropicProviderMock:
                 messages=[{"role": "user", "content": "Hello"}],
                 stream=False,
             )
+
+    def test_prompt_caching_payload(self, mock_anthropic_server):
+        """Should verify that system prompt and tools have cache_control."""
+        base_url = f"http://127.0.0.1:{mock_anthropic_server}/v1/messages"
+        config = _make_config("anthropic", base_url)
+        provider = get_provider(config)
+
+        provider.chat(
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello"}
+            ],
+            tools=[ToolDefinition(name="web_search", description="Search", parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]})],
+            stream=False,
+        )
+
+        assert len(MockAnthropicHandler.requests) == 1
+        req = MockAnthropicHandler.requests[0]
+        # Assert system prompt has cache_control
+        assert "system" in req
+        assert isinstance(req["system"], list)
+        assert req["system"][-1]["type"] == "text"
+        assert req["system"][-1]["text"] == "You are a helpful assistant."
+        assert req["system"][-1]["cache_control"] == {"type": "ephemeral"}
+
+        # Assert tools have cache_control
+        assert "tools" in req
+        assert isinstance(req["tools"], list)
+        assert req["tools"][-1]["name"] == "web_search"
+        assert req["tools"][-1]["cache_control"] == {"type": "ephemeral"}
 
 
 class TestOpenAIProviderMock:

@@ -348,53 +348,194 @@ def _format_class(node: ast.ClassDef) -> str:
     return f"Class: {node.name}{bases_str}"
 
 
-def _get_ast_symbols(root: Path, max_files: int = 15) -> str:
-    """Scan key Python files and extract class and function structures using AST.
+def _get_regex_symbols(file_path: Path) -> list[str]:
+    """Extract class, struct, type and function definitions from non-Python files using regex."""
+    ext = file_path.suffix.lower()
+    symbols = []
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
 
-    Returns a formatted string containing the semantic structure of the code.
+    lines = content.splitlines()
+
+    # JS/TS patterns
+    if ext in (".js", ".ts", ".jsx", ".tsx"):
+        class_pat = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?class\s+(\w+)")
+        fn_pat1 = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)")
+        fn_pat2 = re.compile(r"^\s*(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>")
+        method_pat = re.compile(r"^\s*(?:private|protected|public|async)?\s*(\w+)\s*\(([^)]*)\)\s*(?::|{)")
+
+        in_class = False
+        for line in lines:
+            line_str = line.strip()
+            cm = class_pat.match(line_str)
+            if cm:
+                symbols.append(f"    - Class: {cm.group(1)}")
+                in_class = True
+                continue
+
+            fm1 = fn_pat1.match(line_str)
+            if fm1:
+                symbols.append(f"    - Function: {fm1.group(1)}({fm1.group(2)})")
+                continue
+
+            fm2 = fn_pat2.match(line_str)
+            if fm2:
+                symbols.append(f"    - Function: {fm2.group(1)}({fm2.group(2)})")
+                continue
+
+            if in_class and not line_str.startswith("}"):
+                mm = method_pat.match(line_str)
+                if mm and mm.group(1) not in ("if", "for", "while", "switch", "catch", "constructor"):
+                    symbols.append(f"      • {mm.group(1)}({mm.group(2)})")
+
+            if line_str.startswith("}"):
+                in_class = False
+
+    # Rust patterns
+    elif ext == ".rs":
+        struct_pat = re.compile(r"^\s*(?:pub\s+)?(?:struct|enum|trait)\s+(\w+)")
+        fn_pat = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)")
+        impl_pat = re.compile(r"^\s*impl(?:\s+<\w+>)?\s+(\w+)")
+
+        in_impl = False
+        for line in lines:
+            line_str = line.strip()
+            sm = struct_pat.match(line_str)
+            if sm:
+                symbols.append(f"    - Struct/Enum/Trait: {sm.group(1)}")
+                continue
+
+            im = impl_pat.match(line_str)
+            if im:
+                symbols.append(f"    - impl {im.group(1)}")
+                in_impl = True
+                continue
+
+            fm = fn_pat.match(line_str)
+            if fm:
+                if in_impl:
+                    symbols.append(f"      • fn {fm.group(1)}({fm.group(2)})")
+                else:
+                    symbols.append(f"    - fn {fm.group(1)}({fm.group(2)})")
+
+            if line_str.startswith("}"):
+                in_impl = False
+
+    # Go patterns
+    elif ext == ".go":
+        type_pat = re.compile(r"^\s*type\s+(\w+)\s+(?:struct|interface)")
+        fn_pat = re.compile(r"^\s*func\s+(\w+)\s*\(([^)]*)\)")
+        method_pat = re.compile(r"^\s*func\s*\(\s*\w+\s*\*?(\w+)\s*\)\s*(\w+)\s*\(([^)]*)\)")
+
+        for line in lines:
+            line_str = line.strip()
+            tm = type_pat.match(line_str)
+            if tm:
+                symbols.append(f"    - Type: {tm.group(1)}")
+                continue
+
+            mm = method_pat.match(line_str)
+            if mm:
+                symbols.append(f"      • func ({mm.group(1)}) {mm.group(2)}({mm.group(3)})")
+                continue
+
+            fm = fn_pat.match(line_str)
+            if fm:
+                symbols.append(f"    - func {fm.group(1)}({fm.group(2)})")
+
+    # C/C++ patterns
+    elif ext in (".cpp", ".hpp", ".c", ".h"):
+        class_pat = re.compile(r"^\s*(?:class|struct)\s+(\w+)")
+        fn_pat = re.compile(r"^\s*(?:\w+\s+)?(?:async\s+)?(\w+)\s*\(([^)]*)\)\s*(?:const)?\s*(?:{|;)")
+
+        for line in lines:
+            line_str = line.strip()
+            cm = class_pat.match(line_str)
+            if cm:
+                symbols.append(f"    - Class/Struct: {cm.group(1)}")
+                continue
+
+            fm = fn_pat.match(line_str)
+            if fm:
+                if fm.group(1) not in ("if", "for", "while", "switch", "catch", "return"):
+                    symbols.append(f"    - Function: {fm.group(1)}({fm.group(2)})")
+
+    return symbols
+
+
+def _get_ast_symbols(root: Path, max_files: int = 15) -> str:
+    """Scan key source files (Python, JS/TS, Go, Rust, C++) and extract semantic structures.
+
+    Prioritizes files modified in Git and limits scan to max_files.
     """
     ignored_dirs = {
         ".git", ".venv", "node_modules", ".nyx", "__pycache__",
         ".pytest_cache", ".nyx_memory", "build", "dist", "nyx.egg-info",
         "venv", "env", ".env", "tests", "test",
     }
+    allowed_extensions = {
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".cpp", ".hpp", ".c", ".h"
+    }
 
-    py_files: list[Path] = []
+    # 1. Identify modified files via Git
+    modified_files = set()
+    git_status = _run_git(["status", "--short"], root)
+    if git_status:
+        for line in git_status.splitlines():
+            if len(line) > 3:
+                path_str = line[3:].strip()
+                modified_files.add((root / path_str).resolve())
+
+    # 2. Collect all source files
+    source_files = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in ignored_dirs and not d.startswith(".")]
         for filename in filenames:
-            if filename.endswith(".py") and filename != "__init__.py":
-                py_files.append(Path(dirpath) / filename)
+            file_path = Path(dirpath) / filename
+            if file_path.suffix.lower() in allowed_extensions and filename != "__init__.py":
+                source_files.append(file_path.resolve())
 
-    py_files = sorted(py_files)
-    if not py_files:
+    # 3. Sort files: modified first, then alphabetically
+    def sort_key(p: Path) -> tuple[int, str]:
+        is_mod = 0 if p in modified_files else 1
+        return (is_mod, str(p).lower())
+
+    source_files.sort(key=sort_key)
+
+    if not source_files:
         return ""
 
-    lines = ["\n🧬 Semantic Symbols (AST-based):"]
-    files_to_scan = py_files[:max_files]
+    lines = ["\n🧬 Semantic Symbols:"]
+    files_to_scan = source_files[:max_files]
 
-    for py_file in files_to_scan:
+    for source_file in files_to_scan:
         try:
-            rel_path = py_file.relative_to(root)
+            rel_path = source_file.relative_to(root)
         except ValueError:
-            rel_path = py_file.name
+            rel_path = source_file.name
 
         try:
-            content = py_file.read_text(encoding="utf-8", errors="ignore")
-            tree = ast.parse(content, filename=str(py_file))
-
             file_symbols = []
-            for node in ast.iter_child_nodes(tree):
-                if isinstance(node, ast.ClassDef):
-                    class_str = f"    - {_format_class(node)}"
-                    file_symbols.append(class_str)
-                    for child in ast.iter_child_nodes(node):
-                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            if child.name == "__init__" or not child.name.startswith("_"):
-                                file_symbols.append(f"      • {_format_func(child)}")
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if not node.name.startswith("_"):
-                        file_symbols.append(f"    - Function: {_format_func(node)}")
+            if source_file.suffix.lower() == ".py":
+                content = source_file.read_text(encoding="utf-8", errors="ignore")
+                tree = ast.parse(content, filename=str(source_file))
+
+                for node in ast.iter_child_nodes(tree):
+                    if isinstance(node, ast.ClassDef):
+                        class_str = f"    - {_format_class(node)}"
+                        file_symbols.append(class_str)
+                        for child in ast.iter_child_nodes(node):
+                            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                if child.name == "__init__" or not child.name.startswith("_"):
+                                    file_symbols.append(f"      • {_format_func(child)}")
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if not node.name.startswith("_"):
+                            file_symbols.append(f"    - Function: {_format_func(node)}")
+            else:
+                # Use regex parser for other languages
+                file_symbols = _get_regex_symbols(source_file)
 
             if file_symbols:
                 lines.append(f"  • {rel_path}:")
@@ -402,10 +543,10 @@ def _get_ast_symbols(root: Path, max_files: int = 15) -> str:
                 if len(file_symbols) > 15:
                     lines.append(f"    ... and {len(file_symbols) - 15} more symbols")
         except Exception as e:
-            logger.debug("Could not parse AST for %s: %s", py_file, e)
+            logger.debug("Could not parse symbols for %s: %s", source_file, e)
 
-    if len(py_files) > max_files:
-        lines.append(f"  (AST scan limited to first {max_files} of {len(py_files)} Python files)")
+    if len(source_files) > max_files:
+        lines.append(f"  (Semantic scan limited to first {max_files} of {len(source_files)} code files)")
 
     return "\n".join(lines)
 
@@ -424,6 +565,12 @@ def build_repo_map(root: str | Path | None = None) -> str:
 
     if not root.is_dir():
         return f"Error: '{root}' is not a valid directory."
+
+    # Index static dependencies
+    try:
+        index_dependencies(root)
+    except Exception as e:
+        logger.debug("Failed to index dependencies: %s", e)
 
     parts: list[str] = []
     parts.append("=" * 60)
@@ -513,3 +660,104 @@ def build_repo_map_short(root: str | Path | None = None) -> str:
     if test_info["test_files"]:
         parts.append(f"🧪 {len(test_info['test_files'])} tests")
     return " | ".join(parts)
+
+
+def index_dependencies(root: str | Path | None = None) -> dict[str, list[str]]:
+    """Index file-level dependencies by parsing imports/requires and save to .nyx/repo_graph.json."""
+    import re
+    import json
+    if root is None:
+        root = Path.cwd()
+    else:
+        root = Path(root).resolve()
+
+    graph = {}
+    
+    # Define regex for imports per extension
+    patterns = {
+        ".py": [
+            re.compile(r"^\s*import\s+([\w\.]+)"),
+            re.compile(r"^\s*from\s+([\w\.]+)\s+import")
+        ],
+        ".js": [
+            re.compile(r"import\s+.*\s+from\s+['\"]([^'\"]+)['\"]"),
+            re.compile(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
+        ],
+        ".ts": [
+            re.compile(r"import\s+.*\s+from\s+['\"]([^'\"]+)['\"]"),
+            re.compile(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
+        ],
+        ".jsx": [
+            re.compile(r"import\s+.*\s+from\s+['\"]([^'\"]+)['\"]"),
+            re.compile(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
+        ],
+        ".tsx": [
+            re.compile(r"import\s+.*\s+from\s+['\"]([^'\"]+)['\"]"),
+            re.compile(r"require\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
+        ],
+        ".rs": [
+            re.compile(r"^\s*(?:pub\s+)?use\s+([\w:]+)")
+        ],
+        ".go": [
+            re.compile(r"import\s+['\"]([^'\"]+)['\"]"),
+            re.compile(r"^\s*['\"]([^'\"]+)['\"]") # for multiline import blocks
+        ]
+    }
+
+    # Helper to walk files recursively
+    for dirpath, _, filenames in os.walk(root):
+        dir_parts = Path(dirpath).parts
+        if any(part.startswith(".") or part in ("node_modules", "venv", "__pycache__", "build", "dist") for part in dir_parts):
+            continue
+        
+        for fname in filenames:
+            fpath = Path(dirpath) / fname
+            ext = fpath.suffix.lower()
+            if ext not in patterns:
+                continue
+            
+            rel_path = str(fpath.relative_to(root))
+            imports = []
+            
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="ignore")
+                lines = content.splitlines()
+                
+                in_go_import = False
+                for line in lines:
+                    line_stripped = line.strip()
+                    if ext == ".go":
+                        if line_stripped.startswith("import ("):
+                            in_go_import = True
+                            continue
+                        elif in_go_import and line_stripped.startswith(")"):
+                            in_go_import = False
+                            continue
+                    
+                    for pat in patterns[ext]:
+                        if ext == ".go" and in_go_import:
+                            m = patterns[".go"][1].match(line_stripped)
+                            if m:
+                                imports.append(m.group(1))
+                                break
+                        else:
+                            m = pat.search(line)
+                            if m:
+                                imports.append(m.group(1))
+                                break
+            except Exception as e:
+                logger.warning("Error indexing dependencies for %s: %s", rel_path, e)
+                continue
+                
+            if imports:
+                graph[rel_path] = sorted(list(set(imports)))
+
+    try:
+        nyx_dir = root / ".nyx"
+        nyx_dir.mkdir(exist_ok=True)
+        graph_file = nyx_dir / "repo_graph.json"
+        graph_file.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("Could not save repo_graph.json: %s", e)
+
+    return graph

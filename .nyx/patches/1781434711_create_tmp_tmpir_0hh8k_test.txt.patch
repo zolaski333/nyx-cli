@@ -1,0 +1,9 @@
+# Nyx Patch Record
+# File: /tmp/tmpir_0hh8k/test.txt
+# Type: create
+# Time: 2026-06-14 12:58:31
+# Success: True
+# Summary: CREATE  /tmp/tmpir_0hh8k/test.txt (11 bytes)
+# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781434711_tmp_tmpir_0hh8k_test.txt_521e4918.bak
+
+(new file: /tmp/tmpir_0hh8k/test.txt)

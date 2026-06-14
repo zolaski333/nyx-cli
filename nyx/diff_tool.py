@@ -1331,11 +1331,62 @@ class PatchTool:
 # ---------------------------------------------------------------------------
 
 
-def _apply_unified_diff_to_content(original: str, diff_text: str) -> str | None:
-    """Apply a unified diff to original content and return the result.
+def _find_best_hunk_match(
+    original_lines: list[str],
+    search_lines: list[str],
+    expected_idx: int,
+    window: int = 150,
+    threshold: float = 0.7,
+) -> int | None:
+    """Find the best matching index of search_lines in original_lines near expected_idx using SequenceMatcher.
 
-    This is a pure-Python implementation that reconstructs the proposed
-    content by applying each hunk sequentially.
+    Returns the index in original_lines, or None if no match passes threshold.
+    """
+    if not search_lines:
+        return expected_idx
+
+    n_search = len(search_lines)
+    n_orig = len(original_lines)
+
+    # Clean search_lines normalisation
+    search_norm = "\n".join(_normalize_line(l) for l in search_lines).strip()
+
+    # Search bounds
+    start_search = max(0, expected_idx - window)
+    end_search = min(n_orig - n_search + 1, expected_idx + window)
+
+    if start_search >= end_search:
+        # Fallback to scan entire file if window boundaries are small or invalid
+        if n_orig >= n_search:
+            start_search = 0
+            end_search = n_orig - n_search + 1
+        else:
+            return None
+
+    best_ratio = 0.0
+    best_idx = None
+
+    for i in range(start_search, end_search):
+        slice_lines = original_lines[i : i + n_search]
+        slice_norm = "\n".join(_normalize_line(l) for l in slice_lines).strip()
+
+        if slice_norm == search_norm:
+            return i
+
+        matcher = difflib.SequenceMatcher(None, slice_norm, search_norm)
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_idx = i
+
+    if best_ratio >= threshold and best_idx is not None:
+        return best_idx
+
+    return None
+
+
+def _apply_unified_diff_to_content(original: str, diff_text: str) -> str | None:
+    """Apply a unified diff to original content using fuzzy hunk matching to tolerate line shifts.
 
     Args:
         original: The original file content.
@@ -1346,52 +1397,73 @@ def _apply_unified_diff_to_content(original: str, diff_text: str) -> str | None:
     """
     original_lines = original.splitlines()
     diff_lines = diff_text.splitlines()
-    result: list[str] = []
-    orig_idx = 0  # Current position in original_lines
 
-    i = 0
-    while i < len(diff_lines):
-        line = diff_lines[i]
+    # 1. Parse diff into hunks
+    hunks = []
+    current_hunk = None
+
+    for line in diff_lines:
         m = _HUNK_HEADER_RE.match(line)
         if m:
+            if current_hunk:
+                hunks.append(current_hunk)
             old_start = int(m.group(1))
-            int(m.group(2)) if m.group(2) else 1
+            current_hunk = {
+                "old_start": old_start,
+                "lines": []
+            }
+        elif current_hunk is not None:
+            # Skip diff file headers, git comments, etc. Only parse actual hunk body.
+            if line.startswith((" ", "-", "+")):
+                current_hunk["lines"].append(line)
 
-            # Copy lines before this hunk
-            while orig_idx < old_start - 1 and orig_idx < len(original_lines):
-                result.append(original_lines[orig_idx])
-                orig_idx += 1
+    if current_hunk:
+        hunks.append(current_hunk)
 
-            # Process hunk lines
-            i += 1
-            hunk_old_consumed = 0
-            while i < len(diff_lines) and not _HUNK_HEADER_RE.match(diff_lines[i]):
-                hunk_line = diff_lines[i]
-                if hunk_line.startswith(" "):
-                    # Context line — should match original
-                    if orig_idx < len(original_lines):
-                        result.append(original_lines[orig_idx])
-                        orig_idx += 1
-                    hunk_old_consumed += 1
-                elif hunk_line.startswith("-"):
-                    # Removed line — skip in original
-                    if orig_idx < len(original_lines):
-                        orig_idx += 1
-                    hunk_old_consumed += 1
-                elif hunk_line.startswith("+"):
-                    # Added line
-                    result.append(hunk_line[1:])
-                # Skip other lines (like \ No newline at end of file)
-                i += 1
-            continue  # Don't increment i again — we already consumed the hunk
-        i += 1
+    if not hunks:
+        return original  # Nothing to apply
 
-    # Copy remaining original lines
-    while orig_idx < len(original_lines):
-        result.append(original_lines[orig_idx])
-        orig_idx += 1
+    cumulative_offset = 0
 
-    return "\n".join(result)
+    for hunk in hunks:
+        hunk_lines = hunk["lines"]
+        old_start = hunk["old_start"]
+
+        expected_idx = (old_start - 1) + cumulative_offset
+
+        # Split hunk lines into search (original context/deletions) and replace (context/additions)
+        search_block = []
+        replace_block = []
+
+        for hl in hunk_lines:
+            if hl.startswith(" "):
+                search_block.append(hl[1:])
+                replace_block.append(hl[1:])
+            elif hl.startswith("-"):
+                search_block.append(hl[1:])
+            elif hl.startswith("+"):
+                replace_block.append(hl[1:])
+
+        # Find best match for the search_block near expected_idx
+        match_idx = _find_best_hunk_match(original_lines, search_block, expected_idx)
+        if match_idx is None:
+            # If search block is empty (pure addition hunk at end or start), use expected_idx
+            if not search_block:
+                match_idx = max(0, min(expected_idx, len(original_lines)))
+            else:
+                logger.warning("Fuzzy matching failed for hunk at expected line %d", old_start)
+                return None
+
+        # Replace lines in original_lines
+        replace_len = len(search_block)
+        original_lines[match_idx : match_idx + replace_len] = replace_block
+
+        # Track the index shift caused by this replacement
+        hunk_shift = len(replace_block) - replace_len
+        cumulative_offset += hunk_shift
+
+    return "\n".join(original_lines)
+
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,13 @@
+# Nyx Patch Record
+# File: /tmp/tmpdtumbh9w/append.txt
+# Type: modify
+# Time: 2026-06-14 13:05:26
+# Success: True
+# Summary: APPEND to: /tmp/tmpdtumbh9w/append.txt (+6 bytes, 1 lines)
+# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781435127_tmp_tmpdtumbh9w_append.txt_cd205f1f.bak
+
+--- a//tmp/tmpdtumbh9w/append.txt
++++ b//tmp/tmpdtumbh9w/append.txt
+@@ -1 +1,2 @@
+ line1
++line2
