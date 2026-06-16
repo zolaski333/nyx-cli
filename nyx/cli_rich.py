@@ -90,6 +90,9 @@ def help_panel() -> Any:
     table.add_row("/model <name>", "Change model")
     table.add_row("/mode <name>", "Switch mode: chat | code | architect | debug")
     table.add_row("/autonomy <lvl>", "Switch autonomy: ask | auto | yolo")
+    table.add_row("/config", "Show configuration status")
+    table.add_row("/config save [--global]", "Save current session config")
+    table.add_row("/config set [--global] <key> <val>", "Set config option")
     table.add_row("/clear", "Clear conversation context")
     table.add_row("/tools [N]", "List tools (paginated, optional page N)")
     table.add_row("/memory [N]", "Show memory status (paginated entries)")
@@ -490,6 +493,102 @@ def run_rich_interactive(agent: Agent, config: Config) -> None:
                 style = "green" if "switched" in msg else "yellow"
                 console.print(f"[{style}]{msg}[/{style}]")
             continue
+
+        if user_input.startswith("/config"):
+            args_list = user_input[7:].strip().split()
+            if not args_list:
+                # Print config status with rich table/panel
+                from rich.table import Table
+                from rich.panel import Panel
+                
+                table = Table(box=box.SIMPLE, show_header=False)
+                table.add_row("[bold]Active Provider[/bold]", config.provider)
+                table.add_row("[bold]Active Model[/bold]", config.model)
+                table.add_row("[bold]Active Mode[/bold]", config.agent_mode)
+                table.add_row("[bold]Active Autonomy[/bold]", config.agent_autonomy)
+                
+                # Import helper for paths
+                from nyx.cli import DEFAULT_USER_CONFIG_PATH, _project_config_path
+                paths_table = Table(box=box.SIMPLE, show_header=True)
+                paths_table.add_column("Level", style="bold")
+                paths_table.add_column("Path", style="dim")
+                paths_table.add_column("Status")
+                
+                paths = [
+                    ("User (Global)", DEFAULT_USER_CONFIG_PATH),
+                    ("Project (Local)", _project_config_path(config.project_dir)),
+                ]
+                for name, path in paths:
+                    status = "[green]exists[/green]" if path.exists() else "[dim]not found[/dim]"
+                    paths_table.add_row(name, str(path), status)
+                
+                console.print(Panel(table, title="[bold cyan]Active Session Configuration[/bold cyan]", border_style="cyan"))
+                console.print(Panel(paths_table, title="[bold]Configuration Files[/bold]", border_style="dim"))
+                
+                console.print("[dim]Use `/config save` to persist current session settings to project config.[/dim]")
+                console.print("[dim]Use `/config save --global` to persist current session settings globally.[/dim]")
+                console.print("[dim]Use `/config set <key> <value>` to change a config option.[/dim]")
+                continue
+
+            subcmd = args_list[0].lower()
+            if subcmd == "save":
+                use_global = "--global" in args_list or "-g" in args_list
+                from nyx.cli import DEFAULT_USER_CONFIG_PATH, _project_config_path, _load_config_file, _write_config_file, _set_nested
+                path = DEFAULT_USER_CONFIG_PATH if use_global else _project_config_path(config.project_dir)
+                try:
+                    data = _load_config_file(path)
+                    data["provider"] = config.provider
+                    data["model"] = config.model
+                    _set_nested(data, "agent.mode", config.agent_mode)
+                    _set_nested(data, "agent.autonomy", config.agent_autonomy)
+                    _write_config_file(path, data)
+                    console.print(f"[green]Successfully saved session config to:[/green] {path}")
+                except Exception as e:
+                    console.print(f"[red]Failed to save config: {e}[/red]")
+                continue
+
+            elif subcmd == "set":
+                use_global = False
+                key_val_args = []
+                for a in args_list[1:]:
+                    if a in ("--global", "-g"):
+                        use_global = True
+                    else:
+                        key_val_args.append(a)
+                
+                if len(key_val_args) < 2:
+                    console.print("[red]Error: `/config set [--global] <key> <value>` requires a key and a value.[/red]")
+                    continue
+                
+                key = key_val_args[0]
+                val_str = " ".join(key_val_args[1:])
+                from nyx.cli import DEFAULT_USER_CONFIG_PATH, _project_config_path, _load_config_file, _write_config_file, _set_nested, _parse_config_value
+                path = DEFAULT_USER_CONFIG_PATH if use_global else _project_config_path(config.project_dir)
+                try:
+                    data = _load_config_file(path)
+                    parsed_val = _parse_config_value(val_str)
+                    _set_nested(data, key, parsed_val)
+                    _write_config_file(path, data)
+                    console.print(f"[green]Updated config key `{key}` to `{parsed_val}` in:[/green] {path}")
+                    
+                    # Apply immediately
+                    from nyx.providers import get_provider
+                    if key == "model":
+                        config.model = parsed_val
+                        agent.provider = get_provider(config)
+                    elif key == "provider":
+                        config.provider = parsed_val
+                        agent.provider = get_provider(config)
+                    elif key == "agent.mode":
+                        agent.switch_mode(parsed_val)
+                    elif key == "agent.autonomy":
+                        agent.switch_autonomy(parsed_val)
+                except Exception as e:
+                    console.print(f"[red]Failed to update config: {e}[/red]")
+                continue
+            else:
+                console.print(f"[red]Unknown config subcommand: {subcmd}. Valid options: save, set[/red]")
+                continue
 
         # Paginated commands
         if user_input.startswith("/tools"):

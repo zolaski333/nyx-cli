@@ -732,3 +732,45 @@ class TestREPLNewCommands:
             env={**os.environ, "OPENROUTER_API_KEY": "test-key"},
         )
         assert result.returncode == 0
+
+    def test_repl_config_status(self):
+        """REPL /config should print active session config."""
+        result = subprocess.run(
+            [sys.executable, NYX_CLI, "--no-color", "--no-rich"],
+            input="/config\n/exit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "OPENROUTER_API_KEY": "test-key"},
+        )
+        assert result.returncode == 0
+        assert "Nyx Configuration Status" in result.stdout
+        assert "Active Model:" in result.stdout
+
+    def test_repl_config_set_and_save(self):
+        """REPL /config set and /config save should work and modify project config."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create a mock project dir with .nyx folder
+            project_path = Path(tmpdir)
+            (project_path / ".nyx").mkdir(parents=True)
+            
+            # Start REPL inside this project directory
+            result = subprocess.run(
+                [sys.executable, NYX_CLI, "--no-color", "--no-rich", "--dir", str(project_path)],
+                input="/config set model test-custom-model\n/config save\n/exit\n",
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "OPENROUTER_API_KEY": "test-key"},
+            )
+            assert result.returncode == 0
+            assert "Updated config key" in result.stdout
+            assert "Successfully saved session config to" in result.stdout
+            
+            # Verify the config file has the expected content
+            config_file = project_path / ".nyx" / "config.json"
+            assert config_file.exists()
+            content = json.loads(config_file.read_text(encoding="utf-8"))
+            assert content.get("model") == "test-custom-model"

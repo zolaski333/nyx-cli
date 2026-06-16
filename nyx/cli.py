@@ -233,6 +233,9 @@ HELP_TEXT = f"""
   {c('/model <name>', CYAN)} Change model
   {c('/mode <name>', CYAN)}  Switch mode: chat | code | architect | debug
   {c('/autonomy <lvl>', CYAN)} Switch autonomy: ask | auto | yolo
+  {c('/config', CYAN)}        Show configuration status
+  {c('/config save [--global]', CYAN)} Save current session config
+  {c('/config set [--global] <k> <v>', CYAN)} Set config option
   {c('/clear', CYAN)}        Clear conversation context
   {c('/tools', CYAN)}        List all available tools
   {c('/memory', CYAN)}       Show memory status
@@ -604,6 +607,86 @@ def run_ansi_interactive(agent: Agent, config: Config) -> None:
                 msg = agent.switch_autonomy(rest)
                 print(f"{c(msg, GREEN if 'switched' in msg else YELLOW)}")
             continue
+
+        if user_input.startswith("/config"):
+            args_list = user_input[7:].strip().split()
+            if not args_list:
+                # Print current configuration status
+                print(f"\n{c('Nyx Configuration Status', BOLD + CYAN)}")
+                print(f"  {c('Active Provider:', DIM)} {config.provider}")
+                print(f"  {c('Active Model:', DIM)}    {config.model}")
+                print(f"  {c('Active Mode:', DIM)}     {config.agent_mode}")
+                print(f"  {c('Active Autonomy:', DIM)} {config.agent_autonomy}")
+                print(f"\n{c('Configuration Files (Priority order):', BOLD)}")
+                paths = [
+                    ("User (Global)", DEFAULT_USER_CONFIG_PATH),
+                    ("Project (Local)", _project_config_path(config.project_dir)),
+                ]
+                for name, path in paths:
+                    status = c("exists", GREEN) if path.exists() else c("not found", DIM)
+                    print(f"  • {c(name, BOLD)}: {path} ({status})")
+                print(f"\n{c('Use `/config save` to persist current session settings to project config.', DIM)}")
+                print(f"{c('Use `/config save --global` to persist current session settings globally.', DIM)}")
+                print(f"{c('Use `/config set <key> <value>` to change a config option.', DIM)}")
+                continue
+
+            subcmd = args_list[0].lower()
+            if subcmd == "save":
+                # Save current settings (model, provider, agent.mode, agent.autonomy)
+                use_global = "--global" in args_list or "-g" in args_list
+                path = DEFAULT_USER_CONFIG_PATH if use_global else _project_config_path(config.project_dir)
+                try:
+                    data = _load_config_file(path)
+                    data["provider"] = config.provider
+                    data["model"] = config.model
+                    _set_nested(data, "agent.mode", config.agent_mode)
+                    _set_nested(data, "agent.autonomy", config.agent_autonomy)
+                    _write_config_file(path, data)
+                    print(f"{c('Successfully saved session config to:', GREEN)} {path}")
+                except Exception as e:
+                    print(f"{c(f'Failed to save config: {e}', RED)}")
+                continue
+
+            elif subcmd == "set":
+                # Set a specific key-value pair
+                use_global = False
+                key_val_args = []
+                for a in args_list[1:]:
+                    if a in ("--global", "-g"):
+                        use_global = True
+                    else:
+                        key_val_args.append(a)
+                
+                if len(key_val_args) < 2:
+                    print(f"{c('Error: `/config set [--global] <key> <value>` requires a key and a value.', RED)}")
+                    continue
+                
+                key = key_val_args[0]
+                val_str = " ".join(key_val_args[1:])
+                path = DEFAULT_USER_CONFIG_PATH if use_global else _project_config_path(config.project_dir)
+                try:
+                    data = _load_config_file(path)
+                    parsed_val = _parse_config_value(val_str)
+                    _set_nested(data, key, parsed_val)
+                    _write_config_file(path, data)
+                    print(f"{c(f'Updated config key `{key}` to `{parsed_val}` in:', GREEN)} {path}")
+                    # Apply immediately
+                    if key == "model":
+                        config.model = parsed_val
+                        agent.provider = get_provider(config)
+                    elif key == "provider":
+                        config.provider = parsed_val
+                        agent.provider = get_provider(config)
+                    elif key == "agent.mode":
+                        agent.switch_mode(parsed_val)
+                    elif key == "agent.autonomy":
+                        agent.switch_autonomy(parsed_val)
+                except Exception as e:
+                    print(f"{c(f'Failed to update config: {e}', RED)}")
+                continue
+            else:
+                print(f"{c(f'Unknown config subcommand: {subcmd}. Valid options: save, set', RED)}")
+                continue
 
         # Paginated commands
         if user_input.startswith("/tools"):
