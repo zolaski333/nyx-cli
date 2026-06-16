@@ -16,6 +16,7 @@ import importlib.util
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from nyx.providers.base import ToolDefinition
@@ -60,12 +61,19 @@ class SkillManager:
         directory = skills_dir or self._skills_dir
         if not directory or not os.path.isdir(directory):
             return []
+        root = Path(directory).resolve()
 
         found: list[Skill] = []
         sys.path.insert(0, directory)
 
         for entry in sorted(os.listdir(directory)):
             path = os.path.join(directory, entry)
+            try:
+                resolved = Path(path).resolve()
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                print(f"  ! Skill '{entry}': path escapes skills directory, skipping.")
+                continue
 
             # Single-file skill: <name>.py
             if entry.endswith(".py") and not entry.startswith("_"):

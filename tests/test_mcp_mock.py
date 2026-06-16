@@ -253,6 +253,17 @@ class TestMCPSession:
         res = session._request("test_method", {})
         assert res == {"success": True}
 
+    def test_mcp_does_not_inherit_secret_env_by_default(self, monkeypatch):
+        """MCP servers should not receive parent API keys unless explicitly passed."""
+        import os
+        from nyx.mcp_client import SAFE_INHERITED_ENV
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+        monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+
+        inherited = {k: v for k, v in os.environ.items() if k in SAFE_INHERITED_ENV}
+        assert "OPENAI_API_KEY" not in inherited
+
 
 
 # =========================================================================

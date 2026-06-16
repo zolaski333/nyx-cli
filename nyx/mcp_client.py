@@ -7,11 +7,25 @@ as callable functions the agent can use.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from nyx.providers.base import ToolDefinition
+
+
+SAFE_INHERITED_ENV = {
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "HOME",
+    "USERPROFILE",
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+}
 
 # ---------------------------------------------------------------------------
 # Helpers: minimal JSON-RPC over stdio
@@ -81,13 +95,16 @@ class MCPSession:
         if not cmd:
             raise RuntimeError(f"MCP server '{self.name}': no 'command' in config.")
 
-        # Inherit parent environment and overlay MCP-specific env vars
-        import os as _os
-        merged_env = dict(_os.environ)
+        # Do not pass the full parent environment to MCP servers by default:
+        # it commonly contains API keys, tokens and local secrets.  Servers get
+        # a minimal process environment plus any explicit env block from config.
+        pass_env = set(self.config.get("pass_env", []))
+        inherited = SAFE_INHERITED_ENV | pass_env
+        merged_env = {k: v for k, v in os.environ.items() if k in inherited}
         if env:
             merged_env.update(env)
         popen_kwargs = {}
-        if _os.name == "nt":
+        if os.name == "nt":
             popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
         self._proc = subprocess.Popen(

@@ -425,10 +425,11 @@ def compute_diff_from_path(path: str | Path, proposed: str) -> str:
 
 def _is_git_repo(directory: str | Path) -> bool:
     """Check if a directory is inside a git repository."""
+    cwd = str(Path(directory).resolve())
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=str(directory),
+            ["git", "-c", f"safe.directory={cwd}", "rev-parse", "--is-inside-work-tree"],
+            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=5,
@@ -458,9 +459,10 @@ def git_diff(filepath: str | Path, staged: bool = False) -> str | None:
         if staged:
             cmd.append("--cached")
         cmd.extend(["--", str(p)])
+        safe_cwd = str(Path(cwd).resolve())
         result = subprocess.run(
-            cmd,
-            cwd=str(cwd),
+            ["git", "-c", f"safe.directory={safe_cwd}", *cmd[1:]],
+            cwd=safe_cwd,
             capture_output=True,
             text=True,
             timeout=10,
@@ -485,10 +487,11 @@ def git_apply_check(diff_text: str, directory: str | Path) -> tuple[bool, str]:
         return False, "Not a git repository"
 
     try:
+        safe_dir = str(Path(directory).resolve())
         result = subprocess.run(
-            ["git", "apply", "--check", "--verbose"],
+            ["git", "-c", f"safe.directory={safe_dir}", "apply", "--check", "--verbose"],
             input=diff_text,
-            cwd=str(directory),
+            cwd=safe_dir,
             capture_output=True,
             text=True,
             timeout=10,

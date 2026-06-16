@@ -148,6 +148,12 @@ class TestAgentSandbox:
         # Should NOT contain SECURITY — unknown commands are now allowed
         assert "SECURITY" not in result
 
+    def test_shell_control_operator_requires_approval(self):
+        """Composite shell commands should require explicit approval."""
+        tc = ToolCall(id="2b", name="execute_command", arguments={"command": "echo ok && echo still-ok"})
+        result = self.agent._execute_tool(tc)
+        assert "denied" in result.lower() or "SECURITY" in result
+
     def test_dangerous_command_requires_approval(self):
         """A dangerous command should trigger the approval flow and be denied if user refuses."""
         # Set up both approval callbacks so the permission model prompts instead of denying
@@ -374,9 +380,26 @@ class TestAgentBuiltinTools:
             # Try to read a file outside the sandbox
             tc = ToolCall(id="1", name="read_file", arguments={"path": "/etc/passwd"})
             result = self.agent._execute_tool(tc)
-            # Should either be blocked by sandbox or allowed by safe_read_path
-            # (safe_read_path allows system paths for reading)
-            assert "SECURITY" not in result  # Should not be a security error for reads
+            # Absolute reads outside the sandbox should be blocked unless allowlisted.
+            assert "SECURITY" in result or "blocked" in result.lower()
+
+    def test_absolute_read_outside_sandbox_blocked(self):
+        """Absolute file reads outside the project root should be blocked."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as project_dir, tempfile.TemporaryDirectory() as outside_dir:
+            outside_file = Path(outside_dir) / "secret.txt"
+            outside_file.write_text("do-not-read", encoding="utf-8")
+            config = Config(openrouter_api_key="sk-test", project_dir=project_dir)
+            agent = Agent(config=config)
+            try:
+                tc = ToolCall(id="outside-read", name="read_file", arguments={"path": str(outside_file)})
+                result = agent._execute_tool(tc)
+                assert "SECURITY" in result or "blocked" in result.lower()
+                assert "do-not-read" not in result
+            finally:
+                agent.shutdown()
 
     def test_sandbox_write_outside_blocked(self):
         """Writing outside the sandbox should be blocked."""

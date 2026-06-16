@@ -1,0 +1,373 @@
+Tu es un auditeur logiciel senior spécialisé dans les CLI agentiques, les outils développeur, les architectures d’agents IA, l’UX en terminal, la sécurité et la qualité de code.
+
+Je veux que tu réalises un audit complet, honnête et exigeant de mon projet CLI agentique nommé **Nyx**.
+
+Ton objectif n’est pas de me flatter. Ton objectif est de trouver ce qui est réellement bon, ce qui est fragile, ce qui est inutile, ce qui est mal conçu, ce qui peut être simplifié, ce qui peut casser, et ce qui rend l’outil moins agréable ou moins crédible face à des alternatives comme Claude Code, Codex CLI, Aider, Goose, Open Interpreter, etc.
+
+Analyse le projet comme si je voulais en faire un outil sérieux, utilisable par d’autres développeurs.
+
+---
+
+# Objectifs de l’audit
+
+Tu dois vérifier :
+
+1. **Qualité globale du code**
+
+   * Lisibilité
+   * Structure
+   * Découpage des fichiers
+   * Nommage
+   * Complexité inutile
+   * Duplication
+   * Dette technique
+   * Robustesse
+   * Maintenabilité
+   * Cohérence entre les modules
+
+2. **Bugs et comportements fragiles**
+
+   * Bugs évidents
+   * Bugs subtils
+   * Cas limites mal gérés
+   * États incohérents
+   * Mauvaise gestion des erreurs
+   * Problèmes de concurrence, d’asynchronisme ou de parallélisme
+   * Mauvaise gestion des chemins, fichiers, permissions, encodages, OS différents
+   * Risques de crash silencieux ou d’erreurs incompréhensibles
+
+3. **Architecture agentique**
+
+   * Est-ce que l’architecture est saine ?
+   * Est-ce que les agents, subagents, plugins, tools, skills ou providers sont bien séparés ?
+   * Est-ce que les responsabilités sont claires ?
+   * Est-ce que le système est extensible sans devenir ingérable ?
+   * Est-ce que la logique agentique est réellement utile ou seulement marketing ?
+   * Est-ce que les subagents synchrones/parallèles apportent une vraie valeur ?
+   * Est-ce que l’orchestration est compréhensible et fiable ?
+
+4. **Fonctionnalités**
+
+   * Liste toutes les fonctionnalités réellement implémentées.
+   * Vérifie si elles fonctionnent réellement dans le code.
+   * Distingue clairement :
+
+     * Fonctionnalités complètes
+     * Fonctionnalités partielles
+     * Fonctionnalités fragiles
+     * Fonctionnalités présentes seulement en façade
+     * Fonctionnalités absentes malgré ce que le projet semble promettre
+   * Dis-moi si certaines fonctionnalités sont inutiles, trop complexes ou mal priorisées.
+
+5. **Confort d’usage / UX terminal**
+
+   * Est-ce que le CLI est agréable à utiliser ?
+   * Est-ce que les commandes sont claires ?
+   * Est-ce que les options sont cohérentes ?
+   * Est-ce que les messages d’erreur aident vraiment l’utilisateur ?
+   * Est-ce que l’on comprend ce que l’agent fait ?
+   * Est-ce que l’utilisateur garde le contrôle ?
+   * Est-ce qu’il y a trop de friction ?
+   * Est-ce que l’outil est intimidant, confus ou verbeux ?
+   * Est-ce que la documentation permet de démarrer rapidement ?
+
+6. **Contraintes inutiles**
+
+   * Repère tout ce qui rend l’outil inutilement contraignant.
+   * Vérifie si certaines décisions techniques limitent trop l’utilisateur.
+   * Vérifie si certaines abstractions compliquent le projet sans bénéfice réel.
+   * Vérifie si certaines dépendances, conventions ou choix d’architecture sont trop rigides.
+
+7. **Sécurité**
+
+   * Risques liés à l’exécution de commandes shell
+   * Risques liés à la modification de fichiers
+   * Risques liés à la lecture de secrets ou variables d’environnement
+   * Risques liés aux clés API
+   * Risques d’injection de prompt
+   * Risques si l’agent lit du code ou de la documentation malveillante
+   * Risques de suppression ou modification destructrice
+   * Permissions trop larges
+   * Absence de confirmation avant actions dangereuses
+
+8. **Fiabilité et tests**
+
+   * Existe-t-il des tests ?
+   * Les tests couvrent-ils les parties importantes ?
+   * Quels tests manquent ?
+   * Quelles parties devraient être testées en priorité ?
+   * Propose une stratégie de tests réaliste :
+
+     * tests unitaires
+     * tests d’intégration
+     * tests end-to-end CLI
+     * tests de sécurité
+     * tests sur vrais projets
+
+9. **Performance**
+
+   * Temps de démarrage
+   * Latence des commandes
+   * Gestion des gros projets
+   * Lecture excessive de fichiers
+   * Coût en tokens
+   * Appels LLM inutiles
+   * Boucles agentiques trop longues
+   * Mauvaise gestion du contexte
+
+10. **Comparaison avec les alternatives**
+    Compare Nyx à des outils comme :
+
+* Claude Code
+* Codex CLI
+* Aider
+* Goose
+* Open Interpreter
+
+Pour chaque comparaison, sois honnête :
+
+* Sur quoi Nyx est potentiellement meilleur ?
+* Sur quoi Nyx est clairement moins bon ?
+* Sur quoi Nyx n’a pas encore assez de preuves ?
+* Quels arguments marketing sont défendables ?
+* Quels arguments marketing sont trop forts ou risqués ?
+
+11. **Critique produit**
+    Analyse Nyx comme un vrai produit :
+
+* Est-ce que le positionnement est clair ?
+* Pour qui est-il fait ?
+* Quel problème résout-il vraiment ?
+* Est-ce qu’il apporte quelque chose de différent ?
+* Est-ce que le projet semble crédible ?
+* Est-ce qu’il est trop ambitieux ?
+* Est-ce que certaines promesses devraient être retirées ou reformulées ?
+
+12. **Documentation**
+    Vérifie :
+
+* README
+* exemples
+* installation
+* configuration
+* usage de base
+* usage avancé
+* explication des providers
+* explication des plugins / skills / MCP / subagents
+* limites connues
+* sécurité
+* contribution
+
+Dis-moi ce qui manque et ce qui doit être réécrit.
+
+---
+
+# Méthode d’analyse attendue
+
+Procède de manière rigoureuse :
+
+1. Explore d’abord l’arborescence du projet.
+2. Identifie le langage, les dépendances, le point d’entrée, les commandes principales.
+3. Lis les fichiers importants avant de conclure.
+4. Ne te base pas uniquement sur le README.
+5. Vérifie si les fonctionnalités annoncées existent vraiment dans le code.
+6. Cherche les bugs avec une mentalité de reviewer sévère.
+7. Exécute les tests existants si possible.
+8. Lance le CLI localement si possible.
+9. Essaie quelques commandes réalistes.
+10. Vérifie les erreurs, les logs, les comportements inattendus.
+11. Note clairement ce qui est prouvé par le code et ce qui est seulement supposé.
+
+---
+
+# Format de réponse attendu
+
+Je veux un rapport structuré comme ceci :
+
+## 1. Verdict global
+
+Donne une note honnête sur 10 pour :
+
+* Qualité du code
+* Architecture
+* UX CLI
+* Fiabilité
+* Sécurité
+* Documentation
+* Potentiel produit
+
+Puis donne un verdict général en quelques paragraphes.
+
+## 2. Ce qui est vraiment bien
+
+Liste les points forts réels du projet.
+Ne mets pas de compliments vagues. Chaque point doit être justifié par le code ou l’usage.
+
+## 3. Problèmes critiques
+
+Liste les problèmes qui peuvent vraiment nuire au projet :
+
+* bugs importants
+* sécurité
+* architecture fragile
+* fonctionnalités fausses ou incomplètes
+* mauvaise UX
+* promesses non tenues
+
+Pour chaque problème :
+
+* explique le problème
+* donne le fichier ou la zone concernée
+* explique l’impact
+* propose une correction concrète
+
+## 4. Problèmes moyens
+
+Même chose, mais pour les problèmes moins graves.
+
+## 5. Détails UX / confort d’usage
+
+Analyse précisément l’expérience utilisateur :
+
+* commandes
+* messages
+* configuration
+* feedback pendant l’exécution
+* confirmations
+* logs
+* onboarding
+* erreurs
+
+Dis-moi ce qui devrait être simplifié.
+
+## 6. Fonctionnalités réellement implémentées
+
+Fais un tableau avec :
+
+| Fonctionnalité annoncée ou visible | Statut | Preuve dans le code | Commentaire |
+| ---------------------------------- | ------ | ------------------- | ----------- |
+
+Statuts possibles :
+
+* Solide
+* Fonctionnel mais fragile
+* Partiel
+* Présent en façade
+* Non trouvé
+* À clarifier
+
+## 7. Fonctionnalités inutiles ou trop complexes
+
+Dis-moi ce qui devrait être :
+
+* supprimé
+* simplifié
+* reporté à plus tard
+* fusionné avec autre chose
+* mieux documenté
+
+## 8. Sécurité
+
+Fais une analyse spécifique des risques :
+
+* shell
+* fichiers
+* secrets
+* prompt injection
+* permissions
+* dépendances
+* actions destructrices
+
+Classe les risques :
+
+* Critique
+* Élevé
+* Moyen
+* Faible
+
+Et propose des protections concrètes.
+
+## 9. Tests à ajouter
+
+Donne une liste priorisée de tests à créer.
+
+Pour chaque test :
+
+* nom du test
+* objectif
+* pourquoi il est important
+* exemple de scénario
+
+## 10. Comparaison avec les concurrents
+
+Fais un tableau :
+
+| Critère | Nyx | Claude Code | Codex CLI | Aider | Goose | Open Interpreter |
+| ------- | --- | ----------- | --------- | ----- | ----- | ---------------- |
+
+Critères à comparer :
+
+* installation
+* UX
+* modification de code
+* compréhension gros projet
+* agents/subagents
+* providers multiples
+* sécurité
+* extensibilité
+* open source
+* maturité
+* documentation
+
+Sois prudent : si tu ne peux pas vérifier un point, écris “non vérifié”.
+
+## 11. Recommandations prioritaires
+
+Donne-moi une roadmap claire, sans planning temporel, classée par priorité :
+
+### Priorité 1 — indispensable
+
+### Priorité 2 — important
+
+### Priorité 3 — amélioration
+
+Chaque recommandation doit être actionnable.
+
+## 12. Ce que je devrais changer dans mon discours marketing
+
+Dis-moi quelles phrases ou promesses sont :
+
+* crédibles
+* trop vagues
+* exagérées
+* risquées juridiquement ou techniquement
+* à reformuler
+
+Propose des formulations plus honnêtes.
+
+## 13. Conclusion brutale mais utile
+
+Termine par une conclusion très honnête :
+
+* Est-ce que Nyx est déjà montrable ?
+* Est-ce que Nyx est utilisable par quelqu’un d’autre que moi ?
+* Est-ce que le projet a un vrai potentiel ?
+* Qu’est-ce qui pourrait le tuer ?
+* Quel est le plus gros levier d’amélioration ?
+
+---
+
+# Contraintes importantes
+
+* Ne sois pas complaisant.
+* Ne sois pas méchant gratuitement.
+* Ne fais pas d’hypothèses positives non vérifiées.
+* Si quelque chose n’est pas clair, indique-le.
+* Si une fonctionnalité est seulement partielle, dis-le clairement.
+* Si une promesse marketing n’est pas défendable, dis-le.
+* Si le code est bon à un endroit, reconnais-le.
+* Si le projet est trop complexe pour son état actuel, dis-le.
+* Propose des corrections concrètes, pas seulement des critiques abstraites.
+* Priorise ce qui améliore réellement l’usage et la fiabilité.
+
+Commence maintenant par explorer le projet, puis produis le rapport complet.

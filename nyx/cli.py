@@ -1,5 +1,5 @@
 """
-Nyx — a zero-dependency agentic coding CLI.
+ Nyx — a standard-library-first agentic coding CLI.
 
 Auto-detects Rich for a beautiful TUI if installed, falls back to basic ANSI.
 
@@ -26,6 +26,7 @@ _approval_lock = threading.Lock()
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from nyx import __version__
 from nyx.config import Config, ConfigError
 from nyx.config import DEFAULT_CONFIG, DEFAULT_USER_CONFIG_PATH
 from nyx.providers import get_provider
@@ -76,7 +77,7 @@ def c(text: str, color: str) -> str:
 
 
 def render_markdown(text: str, force_color: bool = False) -> str:
-    """Render basic markdown using ANSI escape codes for zero-dependency formatting."""
+    """Render basic markdown using ANSI escape codes without runtime UI dependencies."""
     has_color = force_color or supports_color()
 
     import re
@@ -441,7 +442,7 @@ def _get_paginated_arg(user_input: str, cmd: str) -> int:
 def _autocomplete_commands(partial: str) -> list[str]:
     """Return matching built-in commands for autocompletion."""
     commands = [
-        "/help", "/model", "/clear", "/tools", "/memory",
+        "/help", "/model", "/mode", "/autonomy", "/config", "/clear", "/tools", "/memory",
         "/conversations", "/switch", "/reset", "/exit", "/quit", "/q",
     ]
     if not partial:
@@ -479,7 +480,7 @@ def setup_readline(agent: Agent) -> None:
         import atexit
         
         commands = [
-            "/help", "/model", "/clear", "/tools", "/memory",
+            "/help", "/model", "/mode", "/autonomy", "/config", "/clear", "/tools", "/memory",
             "/conversations", "/switch", "/reset", "/exit", "/quit", "/q"
         ]
         
@@ -1004,7 +1005,7 @@ def main() -> None:
         sys.exit(_handle_config_command(sys.argv[1:]))
 
     parser = argparse.ArgumentParser(
-        description="Nyx — Zero-dependency agentic coding CLI",
+        description="Nyx — standard-library-first agentic coding CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -1025,6 +1026,7 @@ def main() -> None:
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
     parser.add_argument("--no-rich", action="store_true", help="Force basic CLI even if Rich is installed")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose/debug logging")
+    parser.add_argument("--version", action="version", version=f"nyx {__version__}")
     parser.add_argument("--json", action="store_true", help="JSON output mode for CI/CD pipelines (requires --prompt)")
     # -- Mode & autonomy --
     parser.add_argument("--mode", type=str, default="", choices=["chat", "code", "architect", "debug"],

@@ -12,6 +12,7 @@ Performance optimizations:
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import hashlib
@@ -27,7 +28,10 @@ from nyx.providers.base import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MEMORY_DIR = Path(__file__).resolve().parent.parent / ".nyx_memory"
+if os.name == "nt":
+    DEFAULT_MEMORY_DIR = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "nyx" / "memory"
+else:
+    DEFAULT_MEMORY_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "nyx" / "memory"
 
 
 # ---------------------------------------------------------------------------

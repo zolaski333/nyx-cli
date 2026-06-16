@@ -407,7 +407,7 @@ def _get_paginated_arg(user_input: str, cmd: str) -> int:
 def _rich_autocomplete(console, partial: str) -> str:
     """Rich autocompletion: show matching commands and return completed prefix."""
     commands = [
-        "/help", "/model", "/clear", "/tools", "/memory",
+        "/help", "/model", "/mode", "/autonomy", "/config", "/clear", "/tools", "/memory",
         "/conversations", "/switch", "/reset", "/exit", "/quit", "/q",
     ]
     if not partial.startswith("/"):

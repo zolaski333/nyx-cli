@@ -199,6 +199,24 @@ class TestArgumentParsing:
         assert result.returncode == 0
         assert "Nyx" in result.stdout
 
+    def test_version_flag(self):
+        """--version should print the installed Nyx version."""
+        result = _run_nyx("--version")
+        assert result.returncode == 0
+        assert "nyx " in result.stdout.lower()
+
+    def test_module_execution_has_no_import_warning(self):
+        """python -m nyx.cli should not warn about nyx.cli already being imported."""
+        result = subprocess.run(
+            [sys.executable, "-m", "nyx.cli", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "OPENROUTER_API_KEY": "test-key-placeholder"},
+        )
+        assert result.returncode == 0
+        assert "RuntimeWarning" not in result.stderr
+
     def test_version_not_implemented(self):
         """Should handle missing version flag gracefully."""
         result = _run_nyx("--prompt", "test", "--no-stream", "--no-color")

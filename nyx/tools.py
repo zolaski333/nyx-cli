@@ -355,6 +355,30 @@ DANGEROUS_OPERATORS: list[str] = [
     ">", ">>", "|",
 ]
 
+
+SHELL_CONTROL_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"[\r\n]"),
+    re.compile(r"(?:^|\s)(?:&&|\|\||;|\||>|>>|<|2>|2>>)(?:\s|$)"),
+    re.compile(r"`[^`]*`"),
+    re.compile(r"\$\([^)]*\)"),
+    re.compile(r"%COMSPEC%", re.IGNORECASE),
+]
+
+
+def command_needs_interactive_review(command: str) -> bool:
+    """Return True when a command is structurally risky even if the verb looks safe."""
+    stripped = command.strip()
+    if not stripped:
+        return False
+    if is_dangerous_command(stripped):
+        return True
+    return any(pattern.search(stripped) for pattern in SHELL_CONTROL_PATTERNS)
+
+
+def _approval_unavailable() -> tuple[bool, str]:
+    return False, "No approval mechanism configured. This command requires manual approval."
+
+
 def is_dangerous_command(command: str) -> bool:
     """Check if a command matches dangerous patterns using word-boundary matching."""
     cmd_lower = command.strip().lower()
@@ -365,6 +389,23 @@ def is_dangerous_command(command: str) -> bool:
         if re.search(rf'\b{re.escape(pattern)}\b', cmd_lower):
             return True
     return False
+
+
+def authorize_command(command: str, context: ToolContext) -> tuple[bool, str, PermissionLevel]:
+    """Authorize a shell command through policy plus structural shell-risk review."""
+    approved, reason, perm_level = context.permissions.authorize_shell(command)
+    if not approved:
+        return approved, reason, perm_level
+
+    if command_needs_interactive_review(command) and perm_level != PermissionLevel.PROMPT:
+        if context.on_command_approval:
+            approved, reason = context.on_command_approval(command)
+        else:
+            approved, reason = _approval_unavailable()
+        if not approved:
+            return False, reason, PermissionLevel.PROMPT
+
+    return True, "", perm_level
 
 def _validate_and_sanitize_external_tool_args(
     name: str,
@@ -436,7 +477,7 @@ def _validate_and_sanitize_external_tool_args(
         
         if is_cmd_key and val.strip():
             # Check shell permissions
-            approved, reason, level = context.permissions.authorize_shell(val)
+            approved, reason, level = authorize_command(val, context)
             if not approved:
                 return False, f"[SECURITY] Permission denied for command '{val[:100]}': {reason}", args
             
@@ -557,8 +598,8 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                     + ", etc."
                 )
 
-            # 1. Check permissions (granular permission model)
-            approved, reason, perm_level = context.permissions.authorize_shell(command)
+            # 1. Check permissions and shell structure (granular policy + injection guard)
+            approved, reason, perm_level = authorize_command(command, context)
             context.audit.log_permission_check("shell", command, perm_level.value, approved, reason)
 
             if not approved:
@@ -576,26 +617,10 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                     f"Please try a different approach that doesn't require this command."
                 )
 
-            # 2. Legacy dangerous patterns check (backward compatibility)
-            if is_dangerous_command(command):
-                if context.on_command_approval:
-                    approved, reason = context.on_command_approval(command)
-                else:
-                    logger.warning("No approval callback configured, denying dangerous command: %s", command)
-                    approved, reason = False, "No approval mechanism configured. This command requires manual approval."
-                if not approved:
-                    logger.warning("User denied dangerous command: %s", command)
-                    return (
-                        f"[SECURITY] Command denied by user: '{command[:200]}'\n"
-                        f"Reason: {reason}\n"
-                        f"Please try a different approach that doesn't require this command."
-                    )
-                logger.info("User approved dangerous command: %s", command)
-
-            # 3. Sandbox wrapping
+            # 2. Sandbox wrapping
             final_command = context.sandbox.prepare_command(command)
 
-            # 4. Execute
+            # 3. Execute
             logger.info("Executing command: %s", command)
             env = os.environ.copy()
             cwd = context.sandbox.root_str if context.sandbox.root else "."
@@ -651,6 +676,13 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
 
             if not resolved.exists():
                 return f"File not found: {raw_path}"
+            approved, reason, perm_level = context.permissions.authorize_file_read(str(resolved))
+            context.audit.log_permission_check("filesystem", str(resolved), perm_level.value, approved, reason)
+            if not approved:
+                return (
+                    f"[SECURITY] File read denied: '{raw_path}'\n"
+                    f"Reason: {reason}"
+                )
             try:
                 content = resolved.read_text(encoding="utf-8")
                 lines = content.splitlines(keepends=True)

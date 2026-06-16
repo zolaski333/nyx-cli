@@ -1,33 +1,39 @@
 <div align="center">
 
-# ⚡ Nyx
+# Nyx
 
-**The zero-dependency agentic coding CLI**
+**A standard-library-first agentic coding CLI**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-**Zero external dependencies • MCP native • Multi-provider • Subagents • Skills • Web search**
+**Multi-provider • guarded file edits • MCP stdio • skills • subagents • web search**
 
 </div>
 
 ---
 
-## ✨ Why Nyx?
+## Why Nyx?
 
-Nyx is an **agentic coding CLI** that runs on **pure Python 3.10+ standard library** — no `pip install`, no `node_modules`, no `cargo`. Clone it and it works instantly.
+Nyx is an **experimental agentic coding CLI** that keeps the runtime small and hackable: the core runs on Python 3.10+ standard library, with optional extras for developer tooling and a richer terminal UI.
 
-| Feature                     | Nyx   | Claude Code | Codex CLI  | Open Interpreter | Aider        | Goose        |
-| --------------------------- | ----- | ----------- | ---------- | ---------------- | ------------ | ------------ |
-| Zero dependencies           | ✅     | ❌           | ❌          | ❌                | ❌            | ✅            |
-| MCP native                  | ✅     | ✅           | ⚠️ Oui     | ❌                | ❌            | ✅            |
-| Plugin skills               | ✅     | ✅           | ✅          | ✅                | ❌            | ✅            |
-| Subagents (sync + parallel) | ✅     | ✅           | ✅          | ❌                | ❌            | ❌            |
-| Web search (no API key)     | ✅     | ✅           | ✅          | ⚠️ Dépend config | ❌            | ❌            |
-| Multi-provider              | ✅     | ❌           | ⚠️ Partiel | ✅                | ✅            | ✅            |
-| Open source                 | ✅ MIT | ❌           | ✅ MIT      | ✅ AGPL           | ✅ Apache 2.0 | ✅ Apache 2.0 |
+Nyx is not yet a drop-in replacement for mature coding agents. Today it is best suited for trusted local projects, experimentation, provider flexibility, and workflows where you want to inspect and extend the agent internals.
+
+Current strengths:
+
+- Small Python codebase with few runtime assumptions.
+- Multi-provider support for OpenRouter, OpenAI-compatible APIs, and Anthropic.
+- Guarded file editing through diff/patch previews, rollback history, and sandbox checks.
+- Tooling for repo maps, code search, tests, shell commands, memory, MCP stdio servers, Python skills, and subagents.
+- CI-friendly single-prompt JSON output.
+
+Experimental areas:
+
+- Shell execution and external tools require care. Nyx now prompts for structurally risky commands, but you should still use it on trusted repositories first.
+- MCP servers and Python skills execute local code. Only enable servers and skills you trust.
+- Parallel subagents exist, but the orchestration model is still young.
 
 
 ---
@@ -196,7 +202,7 @@ nyx --json -p "lint all Python files"
 # }
 ```
 
-The `--json` flag requires `--prompt`/`-p` and outputs newline-delimited JSON with:
+The `--json` flag requires `--prompt`/`-p` and outputs one JSON object with:
 - `status`: `"success"` or `"error"`
 - `result` / `error`: The output or error message
 - `duration_seconds`: Wall-clock time
@@ -218,6 +224,7 @@ The `--json` flag requires `--prompt`/`-p` and outputs newline-delimited JSON wi
 | `--no-stream` | Disable streaming output |
 | `--no-color` | Disable ANSI color output |
 | `--no-rich` | Force basic CLI even if Rich is installed |
+| `--version` | Print the Nyx version |
 | `-v, --verbose` | Enable verbose/debug logging |
 
 ### Interactive Commands
@@ -227,6 +234,11 @@ The `--json` flag requires `--prompt`/`-p` and outputs newline-delimited JSON wi
 | `/help` | Show available commands |
 | `/model` | Show current model |
 | `/model <name>` | Change model on the fly |
+| `/mode [chat\|code\|architect\|debug]` | Show or change the agent mode |
+| `/autonomy [ask\|auto\|yolo]` | Show or change approval behavior |
+| `/config` | Show config status |
+| `/config save [--global]` | Persist current provider/model/mode/autonomy |
+| `/config set [--global] <key> <value>` | Set a config value |
 | `/clear` | Clear conversation context |
 | `/tools [N]` | List all available tools (paginated, optional page N) |
 | `/memory [N]` | Show memory status with paginated entries |
@@ -264,6 +276,8 @@ Connect any [Model Context Protocol](https://modelcontextprotocol.io) server:
 }
 ```
 
+Nyx does not pass the full parent environment to MCP servers by default. Put required tokens in the server's explicit `env` block, or list non-secret variables in `pass_env`.
+
 ### 🎯 Skill System
 
 Create Python skills in the `skills/` directory — they're auto-discovered and exposed as tools:
@@ -283,6 +297,8 @@ parameters = {
 def execute(arguments: dict) -> str:
     return f"Processed: {arguments['input']}"
 ```
+
+Skills are normal Python code. Only load skills from repositories you trust.
 
 ### 👥 Subagents
 
@@ -313,11 +329,19 @@ Conversations are automatically saved to disk with smart summarisation. Switch b
 | `parallel_subagents` | Run multiple subagents in parallel |
 | `memory_save` | Save notes to persistent memory |
 | `memory_recall` | Search past conversations |
-| `execute_command` | Run shell commands |
-| `read_file` | Read files from the filesystem |
-| `write_file` | Write/create files |
+| `execute_command` | Run shell commands with permission checks |
+| `read_file` | Read files inside the sandbox/allowlist |
+| `write_file` | Write/create files through the patch workflow |
 | `append_file` | Append to existing files |
 | `list_files` | List directory contents |
+| `apply_diff` | Apply unified diff or SEARCH/REPLACE patches |
+| `rollback_file` | Roll back the most recent file change |
+| `patch_history` | Show recent patch history |
+| `repo_map` | Summarise repository structure, Git status and tests |
+| `search_code` | Search code with ripgrep/fallback search |
+| `run_tests` | Discover and run project tests |
+| `auto_correct_tests` | Experimental test-fixing loop using a subagent |
+| `find_references` | Find references to a symbol |
 | `finish` | Signal task completion |
 
 ---
@@ -339,6 +363,14 @@ export NYX_PROVIDER="anthropic"         # Override default provider
 See [`config.example.json`](config.example.json) for all available options.
 
 Priority chain: **Environment variables > config.json > Defaults**
+
+### Security model
+
+- File reads and writes are restricted to the project sandbox unless an explicit allow path is configured.
+- Risky shell commands and shell-control operators such as `&&`, `|`, redirection and command substitution require approval.
+- MCP servers receive a minimal environment by default; secrets are not inherited automatically.
+- Python skills run as local code. Treat them like scripts from the repository.
+- `--yolo` disables approval prompts and should only be used in disposable or fully trusted projects.
 
 ---
 
@@ -414,5 +446,5 @@ MIT — see [LICENSE](LICENSE) for details.
 ---
 
 <div align="center">
-  <sub>Built with ❤️ and zero dependencies.</sub>
+  <sub>Built as a small, standard-library-first Python agent.</sub>
 </div>

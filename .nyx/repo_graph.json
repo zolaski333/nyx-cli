@@ -56,6 +56,7 @@
     "glob",
     "json",
     "logging",
+    "nyx",
     "nyx.agent",
     "nyx.cli_rich",
     "nyx.config",
@@ -157,6 +158,7 @@
     "logging",
     "math",
     "nyx.providers.base",
+    "os",
     "pathlib",
     "re",
     "threading",
@@ -226,6 +228,7 @@
     "importlib.util",
     "nyx.providers.base",
     "os",
+    "pathlib",
     "sys",
     "typing"
   ],
@@ -290,7 +293,6 @@
   "nyx/__init__.py": [
     "__future__",
     "nyx.agent",
-    "nyx.cli",
     "nyx.config"
   ],
   "nyx/providers/anthropic_provider.py": [
@@ -407,6 +409,7 @@
     "io",
     "json",
     "nyx.mcp_client",
+    "os",
     "pytest",
     "subprocess",
     "sys",

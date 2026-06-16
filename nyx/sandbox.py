@@ -158,29 +158,14 @@ class Sandbox:
             return False
 
     def safe_read_path(self, path: str | Path) -> Path:
-        """Resolve a path for reading. Allows system paths outside sandbox."""
-        p = Path(path)
-        if p.is_absolute():
-            resolved = p.resolve()
-            # System paths are allowed for reading
-            if os.name == "nt":
-                _sys_prefixes = ("c:\\windows\\", "c:\\program files\\", "c:\\program files (x86)\\")
-                resolved_str = str(resolved).lower()
-            else:
-                _sys_prefixes = ("/etc/", "/usr/")
-                resolved_str = str(resolved)
-            if any(resolved_str.startswith(p) for p in _sys_prefixes):
-                return resolved
-        try:
-            return self.resolve(path)
-        except PathTraversalError:
-            # For reads, fall back to the raw absolute path if it exists
-            raw = str(path)
-            if p.is_absolute() or raw.startswith(("/", "\\")) or (os.name == "nt" and len(raw) >= 2 and raw[1] == ":"):
-                if p.exists():
-                    logger.warning("Read access to path outside sandbox: %s", p)
-                return p.resolve()
-            raise
+        """Resolve a path for reading without escaping the sandbox.
+
+        Reads are data exfiltration risks in an agentic CLI: source files, SSH
+        keys, local config and environment-adjacent files can all be sent to a
+        model.  Keep the same boundary as writes unless the user configured an
+        explicit allow_paths entry.
+        """
+        return self.resolve(path, for_write=False)
 
     # ------------------------------------------------------------------
     # Command execution helpers

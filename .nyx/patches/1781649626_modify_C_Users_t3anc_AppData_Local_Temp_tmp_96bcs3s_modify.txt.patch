@@ -1,0 +1,13 @@
+# Nyx Patch Record
+# File: C:\Users\t3anc\AppData\Local\Temp\tmp_96bcs3s\modify.txt
+# Type: modify
+# Time: 2026-06-17 00:40:25
+# Success: True
+# Summary: MODIFY  C:\Users\t3anc\AppData\Local\Temp\tmp_96bcs3s\modify.txt (+1 -1) 1 hunk(s)
+# Rollback: C:\Users\t3anc\OneDrive\Bureau\nyx-cli\.nyx\rollback\1781649626_C_Users_t3anc_AppData_Local_Temp_tmp_96bcs3s_modify.txt_516ad7b3.bak
+
+<<<<<<< SEARCH
+original content
+=======
+modified content
+>>>>>>> REPLACE

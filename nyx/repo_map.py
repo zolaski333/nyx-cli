@@ -25,13 +25,14 @@ logger = logging.getLogger(__name__)
 
 def _run_git(args: list[str], cwd: str | Path | None = None) -> str:
     """Run a git command and return stdout (or empty string on failure)."""
+    safe_cwd = str(Path(cwd or ".").resolve())
     try:
         proc = subprocess.run(
-            ["git"] + args,
+            ["git", "-c", f"safe.directory={safe_cwd}", *args],
             capture_output=True,
             text=True,
             timeout=10,
-            cwd=cwd or ".",
+            cwd=safe_cwd,
         )
         return proc.stdout.strip() if proc.returncode == 0 else ""
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
