@@ -137,11 +137,18 @@ class MCPSession:
         }
         assert self._proc and self._proc.stdin and self._proc.stdout
         _write_line(self._proc.stdin, req)
-        resp = _read_line(self._proc.stdout)
-        parsed = json.loads(resp)
-        if "error" in parsed and parsed["error"]:
-            raise RuntimeError(f"MCP error: {parsed['error']}")
-        return parsed.get("result", {})
+        while True:
+            resp = _read_line(self._proc.stdout)
+            if not resp.strip().startswith("{"):
+                continue
+            try:
+                parsed = json.loads(resp)
+            except json.JSONDecodeError:
+                continue
+            if parsed.get("id") == self._req_id:
+                if "error" in parsed and parsed["error"]:
+                    raise RuntimeError(f"MCP error: {parsed['error']}")
+                return parsed.get("result", {})
 
     def _notify(self, method: str, params: dict) -> None:
         notif = {

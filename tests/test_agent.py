@@ -48,6 +48,48 @@ class TestAgentContext:
         ctx.add("user", "hello")
         assert len(ctx) == 1
 
+    def test_token_optimizer_disabled(self):
+        ctx = AgentContext(token_optimizer=False, token_optimizer_threshold=10, token_optimizer_keep_chars=4)
+        ctx.add_tool_result("call_1", "test_tool", "very_long_tool_output_value")
+        ctx.add("assistant", "response")
+        
+        # Output should NOT be compressed since token_optimizer is False
+        assert ctx.messages[0]["content"] == "very_long_tool_output_value"
+
+    def test_token_optimizer_threshold(self):
+        ctx = AgentContext(token_optimizer=True, token_optimizer_threshold=100, token_optimizer_keep_chars=4)
+        ctx.add_tool_result("call_1", "test_tool", "short")
+        ctx.add("assistant", "response")
+        
+        # Under threshold, should not be compressed
+        assert ctx.messages[0]["content"] == "short"
+
+    def test_token_optimizer_openai(self):
+        ctx = AgentContext(token_optimizer=True, token_optimizer_threshold=10, token_optimizer_keep_chars=6)
+        
+        # Step 1: Add a tool result. At this stage, it is the latest tool message, so no compression.
+        ctx.add_tool_result("call_1", "read_file", "abcdefghijklmnopqrstuvwxyz")
+        assert ctx.messages[0]["content"] == "abcdefghijklmnopqrstuvwxyz"
+        
+        # Step 2: Add assistant message. Now the tool message should still be uncompressed (compression is disabled).
+        ctx.add("assistant", "I see the file.")
+        assert ctx.messages[0]["content"] == "abcdefghijklmnopqrstuvwxyz"
+
+    def test_token_optimizer_anthropic(self):
+        ctx = AgentContext(token_optimizer=True, token_optimizer_threshold=10, token_optimizer_keep_chars=6)
+        
+        # Step 1: Add Anthropic style tool result
+        ctx.add_tool_result("call_1", "read_file", "abcdefghijklmnopqrstuvwxyz", use_anthropic_format=True)
+        # Check that it's uncompressed initially
+        assert ctx.messages[0]["content"][0]["content"][0]["text"] == "abcdefghijklmnopqrstuvwxyz"
+        
+        # Step 2: Add assistant response
+        ctx.add("assistant", "I see the file.")
+        
+        # Verify Anthropic format remains uncompressed
+        compressed_text = ctx.messages[0]["content"][0]["content"][0]["text"]
+        assert compressed_text == "abcdefghijklmnopqrstuvwxyz"
+
     def test_load_conversation_history(self):
         from nyx.memory import MemoryManager
         import tempfile
@@ -194,6 +236,25 @@ class TestAgentSandbox:
             assert "python:3.11-slim-buster" in wrapped
             assert "python script.py" in wrapped
             assert tmpdir in wrapped
+
+    def test_shlex_quote(self):
+        """Test shlex_quote handles escaping according to OS/platform."""
+        from nyx.sandbox import shlex_quote
+        import os
+        
+        orig_name = os.name
+        try:
+            # Test Windows behavior
+            os.name = "nt"
+            assert shlex_quote('hello') == '"hello"'
+            assert shlex_quote('hello "world"') == '"hello ""world"""'
+            
+            # Test Unix behavior
+            os.name = "posix"
+            assert shlex_quote('hello') == "'hello'"
+            assert shlex_quote("hello 'world'") == "'hello '\\''world'\\'''"
+        finally:
+            os.name = orig_name
 
 
 class TestAgentBuiltinTools:

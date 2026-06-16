@@ -224,6 +224,36 @@ class TestMCPSession:
         assert session._proc is None
         assert dummy_mcp_server.poll() is not None
 
+    def test_mcp_resilience_to_noise(self):
+        """Should skip non-JSON debug lines and notifications to find the correct response."""
+        import io
+        session = MCPSession("dummy", {})
+        session._req_id = 42
+        
+        # We simulate a stdout stream that contains:
+        # 1. Non-JSON debug message
+        # 2. Malformed JSON
+        # 3. A JSON-RPC response with a different ID (e.g., 99)
+        # 4. A JSON-RPC response with the correct ID (43)
+        stdout_data = (
+            "DEBUG: some random logging\n"
+            "{invalid json\n"
+            '{"jsonrpc": "2.0", "id": 99, "result": {"ignored": true}}\n'
+            '{"jsonrpc": "2.0", "id": 43, "result": {"success": true}}\n'
+        ).encode("utf-8")
+        
+        class MockProc:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO(stdout_data)
+        
+        session._proc = MockProc()
+        
+        # _request will increment self._req_id to 43, write request, then read responses
+        res = session._request("test_method", {})
+        assert res == {"success": True}
+
+
 
 # =========================================================================
 # MCP Manager Tests

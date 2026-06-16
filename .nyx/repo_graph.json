@@ -71,6 +71,7 @@
     "re",
     "readline",
     "sys",
+    "threading",
     "time",
     "typing"
   ],
@@ -93,6 +94,7 @@
     "rich.syntax",
     "rich.table",
     "rich.text",
+    "threading",
     "typing"
   ],
   "nyx/config.py": [
@@ -177,6 +179,7 @@
   "nyx/rate_limiter.py": [
     "__future__",
     "_thread",
+    "ctypes",
     "logging",
     "random",
     "threading",
@@ -230,18 +233,16 @@
     "__future__",
     "dataclasses",
     "json",
+    "nyx.audit",
     "nyx.config",
     "nyx.diff_tool",
+    "nyx.memory",
+    "nyx.permissions",
     "nyx.providers",
     "nyx.providers.base",
-    "nyx.repo_map",
-    "nyx.search_code",
-    "nyx.test_loop",
+    "nyx.sandbox",
     "nyx.tools",
-    "nyx.web_search",
     "os",
-    "pathlib",
-    "subprocess",
     "typing"
   ],
   "nyx/test_loop.py": [
@@ -403,6 +404,7 @@
   ],
   "tests/test_mcp_mock.py": [
     "__future__",
+    "io",
     "json",
     "nyx.mcp_client",
     "pytest",

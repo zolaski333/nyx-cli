@@ -16,9 +16,12 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+_approval_lock = threading.Lock()
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -333,30 +336,32 @@ def print_conversations_paginated(agent: Agent, page: int = 1, page_size: int = 
 def _make_ansi_approval_handler() -> Callable[[str], tuple[bool, str]]:
     """Create an interactive approval handler for the ANSI fallback CLI."""
     def handle_approval(command: str) -> tuple[bool, str]:
-        print(f"\n{c('⚠️  SECURITY', YELLOW)} The AI wants to execute a potentially dangerous command:")
-        print(f"  {c(command, CYAN)}")
-        response = input(f"  {c('Allow?', BOLD)} (y/n): ").strip().lower()
-        if response == "y":
-            return True, ""
-        else:
-            reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
-            return False, reason or "User denied the command."
+        with _approval_lock:
+            print(f"\n{c('⚠️  SECURITY', YELLOW)} The AI wants to execute a potentially dangerous command:")
+            print(f"  {c(command, CYAN)}")
+            response = input(f"  {c('Allow?', BOLD)} (y/n): ").strip().lower()
+            if response == "y":
+                return True, ""
+            else:
+                reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
+                return False, reason or "User denied the command."
     return handle_approval
 
 
 def _make_ansi_file_approval_handler() -> Callable[[str, str, str], tuple[bool, str]]:
     """Create an interactive approval handler for file operations (diff/patch)."""
     def handle_file_approval(path: str, summary: str, diff: str) -> tuple[bool, str]:
-        print(f"\n{c('📝 FILE OPERATION', CYAN)} {summary}")
-        print(f"  {c(diff[:2000], DIM)}")
-        if len(diff) > 2000:
-            print(f"  {c('(... diff truncated, full diff has ' + str(len(diff)) + ' chars)', DIM)}")
-        response = input(f"  {c('Apply this change?', BOLD)} (y/n): ").strip().lower()
-        if response == "y":
-            return True, ""
-        else:
-            reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
-            return False, reason or "User denied the file change."
+        with _approval_lock:
+            print(f"\n{c('📝 FILE OPERATION', CYAN)} {summary}")
+            print(f"  {c(diff[:2000], DIM)}")
+            if len(diff) > 2000:
+                print(f"  {c('(... diff truncated, full diff has ' + str(len(diff)) + ' chars)', DIM)}")
+            response = input(f"  {c('Apply this change?', BOLD)} (y/n): ").strip().lower()
+            if response == "y":
+                return True, ""
+            else:
+                reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
+                return False, reason or "User denied the file change."
     return handle_file_approval
 
 

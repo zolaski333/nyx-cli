@@ -230,7 +230,8 @@ def shlex_quote(s: str) -> str:
     """Simple shell quoting for a path string."""
     if os.name == "nt":
         # Windows cmd.exe uses double-quote style
-        return '"' + s.replace('"', '\\"') + '"'
+        return '"' + s.replace('"', '""') + '"'
     # Replace single quotes with end-quote, escaped quote, begin-quote
     escaped = s.replace("'", "'\\''")
     return f"'{escaped}'"
+

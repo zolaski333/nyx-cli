@@ -110,12 +110,31 @@ def _truncate_to_max_tokens(content: str, max_chars: int = 16000) -> str:
     return _semantic_code_fold(content, max_chars)
 
 
+def _compress_text(text: str, keep_chars: int, threshold: int) -> str:
+    """Middle-truncate tool output to save tokens."""
+    if len(text) <= threshold:
+        return text
+    # Avoid re-compressing already compressed text
+    if "... [Tool output compressed" in text:
+        return text
+    half = keep_chars // 2
+    header = text[:half]
+    footer = text[-half:]
+    return (
+        f"{header}\n\n"
+        f"... [Tool output compressed from {len(text)} to {keep_chars} characters to save tokens] ...\n\n"
+        f"{footer}"
+    )
+
 
 @dataclass
 class AgentContext:
     """Conversation context for the agent."""
     messages: list[dict[str, Any]] = field(default_factory=list)
     max_history: int = 50
+    token_optimizer: bool = False
+    token_optimizer_threshold: int = 0
+    token_optimizer_keep_chars: int = 0
 
     def add(self, role: str, content: str) -> None:
         truncated_content = _truncate_to_max_tokens(content)
@@ -124,6 +143,7 @@ class AgentContext:
             keep = [self.messages[0]] if self.messages[0]["role"] == "system" else []
             keep.extend(self.messages[-(self.max_history - len(keep)):])
             self.messages = keep
+        self.compress_history()
 
     def add_tool_result(self, tool_call_id: str, name: str, content: str, use_anthropic_format: bool = False) -> None:
         truncated_content = _truncate_to_max_tokens(content)
@@ -147,6 +167,11 @@ class AgentContext:
                 "name": name,
                 "content": truncated_content,
             })
+        self.compress_history()
+
+    def compress_history(self) -> None:
+        """Compress older tool output messages to reduce token consumption."""
+        pass  # Completely disabled to prevent amnesia
 
     def clear(self) -> None:
         system_msgs = [m for m in self.messages if m["role"] == "system"]

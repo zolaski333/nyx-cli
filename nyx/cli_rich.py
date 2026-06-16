@@ -7,8 +7,11 @@ Falls back gracefully to the basic CLI if Rich is not installed.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Any, Callable
+
+_approval_lock = threading.Lock()
 
 # Try to import Rich; fall back to basic CLI if unavailable
 try:
@@ -336,14 +339,15 @@ class RichREPLHistory:
 def _make_rich_approval_handler(console) -> Callable[[str], tuple[bool, str]]:
     """Create an interactive approval handler using Rich prompts."""
     def handle_approval(command: str) -> tuple[bool, str]:
-        console.print("\n[bold yellow]⚠️  SECURITY[/bold yellow] The AI wants to execute a potentially dangerous command:")
-        console.print(f"  [cyan]{command}[/cyan]")
-        response = console.input("  [bold]Allow?[/bold] (y/n): ").strip().lower()
-        if response == "y":
-            return True, ""
-        else:
-            reason = console.input("  [dim]Reason for denial:[/dim] ").strip()
-            return False, reason or "User denied the command."
+        with _approval_lock:
+            console.print("\n[bold yellow]⚠️  SECURITY[/bold yellow] The AI wants to execute a potentially dangerous command:")
+            console.print(f"  [cyan]{command}[/cyan]")
+            response = console.input("  [bold]Allow?[/bold] (y/n): ").strip().lower()
+            if response == "y":
+                return True, ""
+            else:
+                reason = console.input("  [dim]Reason for denial:[/dim] ").strip()
+                return False, reason or "User denied the command."
     return handle_approval
 
 
@@ -353,40 +357,42 @@ def _make_rich_file_approval_handler(console) -> Callable[[str, str, str], tuple
         from rich.syntax import Syntax
         from rich.panel import Panel
 
-        console.print("\n[bold cyan]📝 FILE OPERATION[/bold cyan]")
-        console.print(f"  [bold]{summary}[/bold]")
+        with _approval_lock:
+            console.print("\n[bold cyan]📝 FILE OPERATION[/bold cyan]")
+            console.print(f"  [bold]{summary}[/bold]")
 
-        if diff:
-            # Determine change type and styling
-            border_style = "cyan"
-            title = "[bold]Changes[/bold]"
-            if "CREATE" in summary:
-                border_style = "green"
-                title = f"[bold green]CREATE: {path}[/bold green]"
-            elif "DELETE" in summary:
-                border_style = "red"
-                title = f"[bold red]DELETE: {path}[/bold red]"
-            elif "MODIFY" in summary or "APPEND" in summary or "Patch" in summary:
-                border_style = "yellow"
-                title = f"[bold yellow]MODIFY: {path}[/bold yellow]"
+            if diff:
+                # Determine change type and styling
+                border_style = "cyan"
+                title = "[bold]Changes[/bold]"
+                if "CREATE" in summary:
+                    border_style = "green"
+                    title = f"[bold green]CREATE: {path}[/bold green]"
+                elif "DELETE" in summary:
+                    border_style = "red"
+                    title = f"[bold red]DELETE: {path}[/bold red]"
+                elif "MODIFY" in summary or "APPEND" in summary or "Patch" in summary:
+                    border_style = "yellow"
+                    title = f"[bold yellow]MODIFY: {path}[/bold yellow]"
 
-            # Show diff with syntax highlighting
-            try:
-                syntax = Syntax(diff[:5000], "diff", theme="monokai", line_numbers=True)
-                console.print(Panel(syntax, title=title, border_style=border_style))
-            except Exception:
-                console.print(f"  [dim]{diff[:5000]}[/dim]")
+                # Show diff with syntax highlighting
+                try:
+                    syntax = Syntax(diff[:5000], "diff", theme="monokai", line_numbers=True)
+                    console.print(Panel(syntax, title=title, border_style=border_style))
+                except Exception:
+                    console.print(f"  [dim]{diff[:5000]}[/dim]")
 
-            if len(diff) > 5000:
-                console.print(f"  [dim](... diff truncated, {len(diff)} total chars)[/dim]")
+                if len(diff) > 5000:
+                    console.print(f"  [dim](... diff truncated, {len(diff)} total chars)[/dim]")
 
-        response = console.input("  [bold]Apply this change?[/bold] (y/n): ").strip().lower()
-        if response == "y":
-            return True, ""
-        else:
-            reason = console.input("  [dim]Reason for denial:[/dim] ").strip()
-            return False, reason or "User denied the file change."
+            response = console.input("  [bold]Apply this change?[/bold] (y/n): ").strip().lower()
+            if response == "y":
+                return True, ""
+            else:
+                reason = console.input("  [dim]Reason for denial:[/dim] ").strip()
+                return False, reason or "User denied the file change."
     return handle_file_approval
+
 
 
 def _get_paginated_arg(user_input: str, cmd: str) -> int:

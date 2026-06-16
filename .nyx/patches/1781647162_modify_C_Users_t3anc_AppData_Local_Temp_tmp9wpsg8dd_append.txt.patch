@@ -1,0 +1,13 @@
+# Nyx Patch Record
+# File: C:\Users\t3anc\AppData\Local\Temp\tmp9wpsg8dd\append.txt
+# Type: modify
+# Time: 2026-06-16 23:59:21
+# Success: True
+# Summary: APPEND to: C:\Users\t3anc\AppData\Local\Temp\tmp9wpsg8dd\append.txt (+6 bytes, 1 lines)
+# Rollback: C:\Users\t3anc\OneDrive\Bureau\nyx-cli\.nyx\rollback\1781647162_C_Users_t3anc_AppData_Local_Temp_tmp9wpsg8dd_append.txt_cd205f1f.bak
+
+--- a/C:\Users\t3anc\AppData\Local\Temp\tmp9wpsg8dd\append.txt
++++ b/C:\Users\t3anc\AppData\Local\Temp\tmp9wpsg8dd\append.txt
+@@ -1 +1,2 @@
+ line1
++line2

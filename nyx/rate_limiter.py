@@ -181,6 +181,25 @@ class TimeoutError(Exception):
     pass
 
 
+class TimeoutInterrupt(BaseException):
+    """Internal exception raised to interrupt a background thread on timeout."""
+    pass
+
+
+def _raise_in_thread(thread_id: int, ex: type[BaseException]) -> None:
+    """Raise an exception asynchronously in a running thread by its ID."""
+    try:
+        import ctypes
+        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_long(thread_id),
+            ctypes.pyapi.PyObj_FromPtr(id(ex))
+        )
+        if res > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), None)
+    except Exception as e:
+        logger.debug("Failed to raise async exception in thread: %s", e)
+
+
 class timeout:
     """Context manager that raises TimeoutError if the block takes too long.
 
@@ -195,6 +214,7 @@ class timeout:
         self._message = message
         self._timed_out = False
         self._timer: threading.Timer | None = None
+        self._thread_id = threading.current_thread().ident or 0
 
     def __enter__(self) -> "timeout":
         self._timer = threading.Timer(self._seconds, self._trigger)
@@ -207,14 +227,17 @@ class timeout:
             self._timer.cancel()
             self._timer = None
         if self._timed_out:
+            # Raise TimeoutError, suppressing internal interrupts
             raise TimeoutError(self._message)
         return None
 
     def _trigger(self) -> None:
         self._timed_out = True
-        # Raise an exception in the main thread
-        import _thread
-        _thread.interrupt_main()
+        if self._thread_id == threading.main_thread().ident:
+            import _thread
+            _thread.interrupt_main()
+        else:
+            _raise_in_thread(self._thread_id, TimeoutInterrupt)
 
 
 # ---------------------------------------------------------------------------
