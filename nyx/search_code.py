@@ -103,14 +103,110 @@ class SearchResult:
 
 
 def _find_engine() -> str:
-    """Find the best available search engine. Returns 'rg', 'grep', or ''."""
+    """Find the best available search engine. Returns 'rg', 'grep', 'ag', or 'python_fallback'."""
     if shutil.which("rg"):
         return "rg"
     if shutil.which("ag"):
         return "ag"
     if shutil.which("grep"):
         return "grep"
-    return ""
+    return "python_fallback"
+
+
+def _search_python_fallback(
+    pattern: str,
+    root: str | Path,
+    *,
+    file_pattern: str | None = None,
+    max_results: int = 100,
+    context_lines: int = 2,
+    case_sensitive: bool = False,
+    regex: bool = False,
+    fixed_strings: bool = False,
+) -> SearchResult:
+    """Fallback search implementation in pure Python when no CLI engine is found."""
+    import os
+    import time
+    import fnmatch
+    t_start = time.perf_counter()
+    root_path = Path(root).resolve()
+    ignored_dirs = {
+        ".git", "node_modules", "__pycache__", ".venv", "venv", ".tox",
+        ".nyx_memory", ".pytest_cache", "build", "dist"
+    }
+    
+    matches: list[SearchMatch] = []
+    files_matched = set()
+    
+    # Compile regex if needed
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        if fixed_strings:
+            search_re = re.compile(re.escape(pattern), flags)
+        else:
+            search_re = re.compile(pattern, flags)
+    except re.error as e:
+        return SearchResult(query=pattern, error=f"Invalid regex: {e}", engine="python_fallback")
+        
+    for root_dir, dirs, files in os.walk(root_path):
+        # In-place modify dirs to skip ignored directories
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
+        
+        for file in files:
+            # Match file pattern if specified
+            if file_pattern and not fnmatch.fnmatch(file.lower(), file_pattern.lower()):
+                continue
+                
+            file_path = Path(root_dir) / file
+            # Skip large files or binaries if possible (e.g. check size < 1MB)
+            try:
+                if file_path.stat().st_size > 1024 * 1024:
+                    continue
+            except OSError:
+                continue
+                
+            try:
+                # Read file content
+                lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError:
+                continue
+                
+            for idx, line in enumerate(lines):
+                if search_re.search(line):
+                    # Found match
+                    line_no = idx + 1
+                    rel_path = file_path.relative_to(root_path).as_posix()
+                    files_matched.add(rel_path)
+                    
+                    # Compute context
+                    start_ctx = max(0, idx - context_lines)
+                    end_ctx = min(len(lines), idx + context_lines + 1)
+                    
+                    context_before = lines[start_ctx:idx]
+                    context_after = lines[idx+1:end_ctx]
+                    
+                    match = SearchMatch(
+                        file=rel_path,
+                        line=line_no,
+                        line_content=line,
+                        context_before=context_before,
+                        context_after=context_after,
+                    )
+                    matches.append(match)
+                    if len(matches) >= max_results:
+                        break
+            if len(matches) >= max_results:
+                break
+                
+    duration_ms = (time.perf_counter() - t_start) * 1000
+    return SearchResult(
+        query=pattern,
+        matches=matches,
+        total_matches=len(matches),
+        files_matched=len(files_matched),
+        duration_ms=duration_ms,
+        engine="python_fallback"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -449,12 +545,6 @@ def search_code(
     root = Path(root).resolve() if root else Path.cwd().resolve()
     engine = _find_engine()
 
-    if not engine:
-        return SearchResult(
-            query=pattern,
-            error="No search engine found. Install ripgrep (rg), ag, or grep.",
-        )
-
     kwargs = {
         "file_pattern": file_pattern,
         "max_results": max_results,
@@ -470,8 +560,10 @@ def search_code(
         # Fall through to grep for now (ag is similar to rg)
         result = _search_grep(pattern, root, **kwargs)
         result.engine = "ag"
-    else:
+    elif engine == "grep":
         result = _search_grep(pattern, root, **kwargs)
+    else:
+        result = _search_python_fallback(pattern, root, **kwargs)
 
     return result
 

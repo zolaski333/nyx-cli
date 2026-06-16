@@ -342,8 +342,14 @@ DANGEROUS_PATTERNS: list[str] = [
     "wget", "curl", "apt", "yum", "dnf", "pacman",
     "pip install", "npm install", "git push", "git reset",
     "git rebase", "git merge", "git cherry-pick",
-    "docker", "systemctl", "journalctl",
 ]
+if os.name == "nt":
+    DANGEROUS_PATTERNS.extend([
+        "del", "rd", "format", "reg", "taskkill",
+        "icacls", "net user", "net localgroup",
+        "powershell", "cmd /c",
+    ])
+
 
 DANGEROUS_OPERATORS: list[str] = [
     ">", ">>", "|",
@@ -545,8 +551,10 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 logger.warning("Empty command received from AI (args=%s)", args)
                 return (
                     "[ERROR] Empty command received. You must provide a valid shell command "
-                    "in the 'command' parameter. For example: 'ls -la', 'cat file.txt', "
-                    "'python3 script.py', 'which python3', etc."
+                    "in the 'command' parameter. For example: "
+                    + ("'dir', 'type file.txt', 'python script.py', 'where python'" if os.name == "nt"
+                       else "'ls -la', 'cat file.txt', 'python3 script.py', 'which python3'")
+                    + ", etc."
                 )
 
             # 1. Check permissions (granular permission model)

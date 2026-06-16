@@ -86,12 +86,17 @@ class MCPSession:
         merged_env = dict(_os.environ)
         if env:
             merged_env.update(env)
+        popen_kwargs = {}
+        if _os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
         self._proc = subprocess.Popen(
             [cmd, *args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=merged_env,
+            **popen_kwargs,
         )
         if not self._proc.stdin or not self._proc.stdout:
             raise RuntimeError(f"MCP server '{self.name}': failed to open pipes.")

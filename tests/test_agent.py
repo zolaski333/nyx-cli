@@ -166,10 +166,13 @@ class TestAgentSandbox:
                 bin_dir.mkdir(parents=True)
                 config = Config(openrouter_api_key="sk-test", project_dir=tmpdir)
                 agent = Agent(config=config)
-                agent.sandbox.set_root(tmpdir)
-                tc = ToolCall(id="1", name="execute_command", arguments={"command": "echo $PATH" if os.name != "nt" else "echo %PATH%"})
-                result = agent._execute_tool(tc)
-                assert str(bin_dir) in result
+                try:
+                    agent.sandbox.set_root(tmpdir)
+                    tc = ToolCall(id="1", name="execute_command", arguments={"command": "echo $PATH" if os.name != "nt" else "echo %PATH%"})
+                    result = agent._execute_tool(tc)
+                    assert str(bin_dir) in result
+                finally:
+                    agent.shutdown()
         finally:
             os.chdir(old_cwd)
 
@@ -388,7 +391,13 @@ class TestAgentBuiltinTools:
     def test_execute_command_smart_truncation(self):
         """execute_command should truncate long outputs intelligently."""
         # We can construct a command that outputs 250 lines
-        cmd = "python3 -c 'for i in range(1, 251): print(f\"line {i}\")'"
+        import sys
+        import os
+        py_exe = sys.executable
+        if os.name == "nt":
+            cmd = f'"{py_exe}" -c "for i in range(1, 251): print(f\'line {{i}}\')"'
+        else:
+            cmd = f"{py_exe} -c 'for i in range(1, 251): print(f\"line {{i}}\")'"
         tc = ToolCall(id="1", name="execute_command", arguments={"command": cmd})
         result = self.agent._execute_tool(tc)
         

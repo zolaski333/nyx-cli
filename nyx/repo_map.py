@@ -194,7 +194,7 @@ def _get_test_info(root: Path) -> dict[str, Any]:
     for pattern in TEST_DIR_PATTERNS:
         d = root / pattern
         if d.is_dir():
-            info["test_dirs"].append(str(d.relative_to(root)))
+            info["test_dirs"].append(d.relative_to(root).as_posix())
 
     # Find test files (optimized to avoid scanning virtualenvs, node_modules, etc.)
     import fnmatch
@@ -212,7 +212,7 @@ def _get_test_info(root: Path) -> dict[str, Any]:
                 if fnmatch.fnmatch(filename, pattern):
                     filepath = Path(dirpath) / filename
                     try:
-                        rel = str(filepath.relative_to(root))
+                        rel = filepath.relative_to(root).as_posix()
                         if rel not in test_files_found:
                             test_files_found.append(rel)
                     except ValueError:
@@ -512,7 +512,7 @@ def _get_ast_symbols(root: Path, max_files: int = 15) -> str:
 
     for source_file in files_to_scan:
         try:
-            rel_path = source_file.relative_to(root)
+            rel_path = source_file.relative_to(root).as_posix()
         except ValueError:
             rel_path = source_file.name
 
@@ -592,7 +592,7 @@ def build_repo_map(root: str | Path | None = None) -> str:
         parts.append("\n⭐ Important Files:")
         for f in important:
             try:
-                rel = f.relative_to(root)
+                rel = f.relative_to(root).as_posix()
                 parts.append(f"  • {rel}")
             except ValueError:
                 parts.append(f"  • {f.name}")
@@ -716,7 +716,7 @@ def index_dependencies(root: str | Path | None = None) -> dict[str, list[str]]:
             if ext not in patterns:
                 continue
             
-            rel_path = str(fpath.relative_to(root))
+            rel_path = fpath.relative_to(root).as_posix()
             imports = []
             
             try:

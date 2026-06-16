@@ -20,7 +20,11 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.json"
 EXAMPLE_CONFIG_PATH = PROJECT_DIR / "config.example.json"
 DEFAULT_PROJECT_CONFIG_PATH = Path.cwd() / ".nyx" / "config.json"
-DEFAULT_USER_CONFIG_PATH = Path.home() / ".config" / "nyx" / "config.json"
+DEFAULT_USER_CONFIG_PATH = (
+    Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "nyx" / "config.json"
+    if os.name == "nt"
+    else Path.home() / ".config" / "nyx" / "config.json"
+)
 
 # ---------------------------------------------------------------------------
 # Defaults

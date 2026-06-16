@@ -929,15 +929,17 @@ class TestStaticAnalysis:
             # Set up agent with config pointing to this project root
             config = Config(openrouter_api_key="sk-test", project_dir=str(tmp_root))
             agent = Agent(config=config)
-            
-            tc = ToolCall(id="1", name="find_references", arguments={"symbol_name": "my_special_symbol"})
-            result = agent._execute_tool(tc)
-            
-            # Should match the first two lines, not the third
-            assert "source.py:1:" in result
-            assert "source.py:2:" in result
-            assert "source.py:3:" not in result
-            assert "my_special_symbol_extra" not in result
+            try:
+                tc = ToolCall(id="1", name="find_references", arguments={"symbol_name": "my_special_symbol"})
+                result = agent._execute_tool(tc)
+                
+                # Should match the first two lines, not the third
+                assert "source.py:1:" in result
+                assert "source.py:2:" in result
+                assert "source.py:3:" not in result
+                assert "my_special_symbol_extra" not in result
+            finally:
+                agent.shutdown()
 
 
 class TestMCPDiscovery:

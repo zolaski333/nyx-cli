@@ -460,7 +460,13 @@ def _ansi_autocomplete(partial: str) -> str:
 def setup_readline(agent: Agent) -> None:
     """Configure readline for command history and tab autocompletion."""
     try:
-        import readline
+        try:
+            import readline
+        except ImportError:
+            try:
+                import pyreadline3 as readline  # type: ignore[no-redef]
+            except ImportError:
+                return
         import glob
         import atexit
         
@@ -508,10 +514,13 @@ def setup_readline(agent: Agent) -> None:
 
         readline.set_completer(completer)
         # Tab key completion (depends on platform)
-        if sys.platform == "darwin":
-            readline.parse_and_bind("bind ^I rl_complete")
-        else:
-            readline.parse_and_bind("tab: complete")
+        try:
+            if sys.platform == "darwin":
+                readline.parse_and_bind("bind ^I rl_complete")
+            elif os.name != "nt":
+                readline.parse_and_bind("tab: complete")
+        except Exception:
+            pass
             
         # History management
         history_path = os.path.expanduser("~/.nyx_history")
@@ -523,7 +532,7 @@ def setup_readline(agent: Agent) -> None:
         readline.set_history_length(1000)
         atexit.register(readline.write_history_file, history_path)
         
-    except ImportError:
+    except Exception:
         pass
 
 
@@ -893,9 +902,15 @@ def main() -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             try:
-                stream.reconfigure(errors="replace")
+                if stream.isatty():
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+                else:
+                    stream.reconfigure(errors="replace")
             except Exception:
-                pass
+                try:
+                    stream.reconfigure(errors="replace")
+                except Exception:
+                    pass
 
     if len(sys.argv) > 1 and sys.argv[1] in {"init", "config"}:
         sys.exit(_handle_config_command(sys.argv[1:]))

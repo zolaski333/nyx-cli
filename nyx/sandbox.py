@@ -62,7 +62,7 @@ class Sandbox:
             return Path.cwd().resolve()
         except FileNotFoundError:
             # CWD was deleted; fall back to a reasonable default
-            return Path("/").resolve()
+            return Path("C:/").resolve() if os.name == "nt" else Path("/").resolve()
 
     # ------------------------------------------------------------------
     # Root management
@@ -163,14 +163,20 @@ class Sandbox:
         if p.is_absolute():
             resolved = p.resolve()
             # System paths are allowed for reading
-            if str(resolved).startswith("/etc/") or str(resolved).startswith("/usr/"):
+            if os.name == "nt":
+                _sys_prefixes = ("c:\\windows\\", "c:\\program files\\", "c:\\program files (x86)\\")
+                resolved_str = str(resolved).lower()
+            else:
+                _sys_prefixes = ("/etc/", "/usr/")
+                resolved_str = str(resolved)
+            if any(resolved_str.startswith(p) for p in _sys_prefixes):
                 return resolved
         try:
             return self.resolve(path)
         except PathTraversalError:
             # For reads, fall back to the raw absolute path if it exists
             raw = str(path)
-            if p.is_absolute() or raw.startswith(("/", "\\")):
+            if p.is_absolute() or raw.startswith(("/", "\\")) or (os.name == "nt" and len(raw) >= 2 and raw[1] == ":"):
                 if p.exists():
                     logger.warning("Read access to path outside sandbox: %s", p)
                 return p.resolve()
@@ -222,6 +228,9 @@ class Sandbox:
 
 def shlex_quote(s: str) -> str:
     """Simple shell quoting for a path string."""
+    if os.name == "nt":
+        # Windows cmd.exe uses double-quote style
+        return '"' + s.replace('"', '\\"') + '"'
     # Replace single quotes with end-quote, escaped quote, begin-quote
     escaped = s.replace("'", "'\\''")
     return f"'{escaped}'"

@@ -180,6 +180,29 @@ class PermissionManager:
                 PermissionRule(r"^dd\s+if=.*\s+of=/\s*", PermissionLevel.DENY, "Raw write to root", is_regex=True),
             ],
         )
+        import os
+        if os.name == "nt":
+            shell.rules.extend([
+                # Windows commands → prompt
+                PermissionRule("del *", PermissionLevel.PROMPT, "File deletion"),
+                PermissionRule("rd *", PermissionLevel.PROMPT, "Directory deletion"),
+                PermissionRule("move *", PermissionLevel.PROMPT, "File move/rename"),
+                PermissionRule("copy *", PermissionLevel.PROMPT, "File copy"),
+                PermissionRule("xcopy *", PermissionLevel.PROMPT, "File copy"),
+                PermissionRule("robocopy *", PermissionLevel.PROMPT, "File copy"),
+                PermissionRule("powershell *", PermissionLevel.PROMPT, "PowerShell execution"),
+                PermissionRule("pwsh *", PermissionLevel.PROMPT, "PowerShell execution"),
+                PermissionRule("cmd *", PermissionLevel.PROMPT, "Command execution"),
+                PermissionRule("taskkill *", PermissionLevel.PROMPT, "Process kill"),
+                PermissionRule("net *", PermissionLevel.PROMPT, "Network/user management"),
+                PermissionRule("sc *", PermissionLevel.PROMPT, "Service control"),
+                PermissionRule("reg *", PermissionLevel.PROMPT, "Registry operation"),
+                PermissionRule("icacls *", PermissionLevel.PROMPT, "Permission change"),
+                PermissionRule("takeown *", PermissionLevel.PROMPT, "Ownership change"),
+                # Explicitly denied commands
+                PermissionRule("format *", PermissionLevel.DENY, "Disk format"),
+            ])
+
 
         # -- Filesystem operations --
         fs = PermissionCategory(
@@ -205,6 +228,15 @@ class PermissionManager:
                 PermissionRule("/etc/passwd", PermissionLevel.DENY, "Password file"),
             ],
         )
+        if os.name == "nt":
+            fs.rules.extend([
+                PermissionRule("C:\\Windows\\*", PermissionLevel.PROMPT, "Windows system dir"),
+                PermissionRule("C:\\Program Files\\*", PermissionLevel.PROMPT, "Program Files"),
+                PermissionRule("C:\\Program Files (x86)\\*", PermissionLevel.PROMPT, "Program Files"),
+                PermissionRule("C:\\Users\\*", PermissionLevel.PROMPT, "User directory"),
+                PermissionRule("C:\\Users\\*\\AppData\\Local\\Temp\\*", PermissionLevel.ALLOW, "Temp folder"),
+                PermissionRule("C:\\Windows\\System32\\*", PermissionLevel.DENY, "System32 files"),
+            ])
 
         self.categories["shell"] = shell
         self.categories["filesystem"] = fs
