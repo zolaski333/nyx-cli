@@ -142,6 +142,15 @@ cat main.py | nyx -p "review this code for bugs"
 nyx -c ./myconfig.json
 ```
 
+### Installation doctor
+
+```bash
+nyx doctor
+nyx doctor --dev
+```
+
+`doctor` checks Python, provider/model configuration, API key presence, Rich, git, pytest, and optional dev tools (`ruff`, `mypy`). It does not call an LLM and works without an API key.
+
 ### Override model/provider
 
 ```bash
@@ -256,7 +265,7 @@ The `--json` flag requires `--prompt`/`-p` and outputs one JSON object with:
 
 ### 🔌 MCP Support
 
-Connect any [Model Context Protocol](https://modelcontextprotocol.io) server:
+Connect [Model Context Protocol](https://modelcontextprotocol.io) stdio servers:
 
 ```json
 {
@@ -276,7 +285,7 @@ Connect any [Model Context Protocol](https://modelcontextprotocol.io) server:
 }
 ```
 
-Nyx does not pass the full parent environment to MCP servers by default. Put required tokens in the server's explicit `env` block, or list non-secret variables in `pass_env`.
+Nyx supports stdio MCP servers. SSE/streamable HTTP transport is not currently implemented. Nyx does not pass the full parent environment to MCP servers by default. Put required tokens in the server's explicit `env` block, or list non-secret variables in `pass_env`.
 
 ### 🎯 Skill System
 
@@ -298,11 +307,11 @@ def execute(arguments: dict) -> str:
     return f"Processed: {arguments['input']}"
 ```
 
-Skills are normal Python code. Only load skills from repositories you trust.
+Skills are trusted local Python code. Loading a skill imports the file, so top-level Python code runs immediately. Only load skills from repositories you trust. Set `"skills_enabled": false` in config to disable skill discovery.
 
 ### 👥 Subagents
 
-Spawn child agents for complex tasks — synchronously or in parallel:
+Spawn child agents for complex tasks. Parallel subagent orchestration is experimental:
 
 ```
 You> analyse the codebase and generate a refactoring plan
@@ -317,7 +326,7 @@ Built-in DuckDuckGo search — no API key needed. The agent can search the web a
 
 ### 💾 Persistent Memory
 
-Conversations are automatically saved to disk with smart summarisation. Switch between conversations, search past context, and never lose your work.
+Conversations are saved to disk with persistent memory and basic summarisation support. Context compression in the live agent history is intentionally conservative; do not treat memory as perfect recall.
 
 ### 🔧 Built-in Tools
 
@@ -344,6 +353,21 @@ Conversations are automatically saved to disk with smart summarisation. Switch b
 | `find_references` | Find references to a symbol |
 | `finish` | Signal task completion |
 
+### Agent modes and autonomy
+
+Modes:
+
+- `chat`: default conversational mode with the full configured tool set.
+- `code`: coding-oriented prompt and full configured tool set.
+- `architect`: read-only planning mode; only read/search/context tools are exposed.
+- `debug`: debugging-oriented prompt and full configured tool set.
+
+Autonomy:
+
+- `ask`: approval prompts are used for risky commands and guarded file operations.
+- `auto`: file changes may be auto-approved, while risky shell commands still require approval.
+- `yolo`: approval prompts are bypassed except for hard-deny permission rules. Use only in disposable or fully trusted projects.
+
 ---
 
 ## ⚙️ Configuration
@@ -367,10 +391,20 @@ Priority chain: **Environment variables > config.json > Defaults**
 ### Security model
 
 - File reads and writes are restricted to the project sandbox unless an explicit allow path is configured.
-- Risky shell commands and shell-control operators such as `&&`, `|`, redirection and command substitution require approval.
+- File modifications are guarded by sandbox checks and approval prompts, but the project is still experimental.
+- Simple shell commands run without a shell where practical. Composite commands and shell-control operators such as `&&`, `|`, redirection and command substitution require approval.
 - MCP servers receive a minimal environment by default; secrets are not inherited automatically.
-- Python skills run as local code. Treat them like scripts from the repository.
+- MCP servers are local processes and can perform whatever their implementation allows. Only configure servers you trust.
+- Python skills run as trusted local code. Treat them like scripts from the repository.
 - `--yolo` disables approval prompts and should only be used in disposable or fully trusted projects.
+
+Known limits:
+
+- Nyx is an experimental agentic coding CLI, not a production-ready security boundary.
+- Shell command parsing is conservative but not a substitute for OS sandboxing.
+- Rollback/history files are best-effort developer aids, not backups.
+- Memory summaries can omit details; keep important project state in files and tests.
+- Subagents and auto-correction loops are useful but still experimental.
 
 ---
 

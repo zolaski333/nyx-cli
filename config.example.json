@@ -18,6 +18,7 @@
     }
   },
   "skills_dir": "skills",
+  "skills_enabled": true,
   "subagents_dir": "subagents",
   "project_dir": "",
   "web_search_enabled": true,

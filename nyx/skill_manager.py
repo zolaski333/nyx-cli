@@ -57,13 +57,18 @@ class SkillManager:
         self._skills_dir = skills_dir
 
     def discover(self, skills_dir: str | None = None) -> list[Skill]:
-        """Scan the skills directory and load all valid skills."""
+        """Scan the skills directory and load all valid skills.
+
+        Skills are trusted local Python code. Importing them executes module
+        top-level code, so only point this manager at directories you control.
+        """
         directory = skills_dir or self._skills_dir
         if not directory or not os.path.isdir(directory):
             return []
         root = Path(directory).resolve()
 
         found: list[Skill] = []
+        print(f"  ! Loading trusted local Python skills from {root}")
         sys.path.insert(0, directory)
 
         for entry in sorted(os.listdir(directory)):

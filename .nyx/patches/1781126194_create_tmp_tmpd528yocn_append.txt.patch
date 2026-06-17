@@ -1,9 +1,0 @@
-# Nyx Patch Record
-# File: /tmp/tmpd528yocn/append.txt
-# Type: create
-# Time: 2026-06-10 23:16:34
-# Success: True
-# Summary: CREATE  /tmp/tmpd528yocn/append.txt (6 bytes)
-# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781126194_tmp_tmpd528yocn_append.txt_521e4918.bak
-
-(new file: /tmp/tmpd528yocn/append.txt)

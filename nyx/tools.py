@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -251,6 +252,7 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
             "properties": {
                 "path": {"type": "string", "description": "Optional path to the repository root (default: current directory)"},
                 "short": {"type": "boolean", "description": "If true, return a one-line summary instead of full map", "default": False},
+                "write_index": {"type": "boolean", "description": "If true, write .nyx/repo_graph.json. Defaults to false.", "default": False},
             },
             "required": [],
         },
@@ -406,6 +408,47 @@ def authorize_command(command: str, context: ToolContext) -> tuple[bool, str, Pe
             return False, reason, PermissionLevel.PROMPT
 
     return True, "", perm_level
+
+
+def _split_simple_command(command: str) -> list[str] | None:
+    """Return argv for commands that do not need shell parsing."""
+    if command_needs_interactive_review(command):
+        return None
+    try:
+        parts = shlex.split(command, posix=(os.name != "nt"))
+    except ValueError:
+        return None
+    if os.name == "nt":
+        parts = [part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part for part in parts]
+    return parts or None
+
+
+def _windows_builtin_command(command: str) -> list[str] | None:
+    """Run common cmd.exe builtins without subprocess shell=True."""
+    if os.name != "nt":
+        return None
+    parts = _split_simple_command(command)
+    if not parts:
+        return None
+    if parts[0].lower() in {"echo", "dir", "type", "where"}:
+        return ["cmd.exe", "/d", "/c", command]
+    return None
+
+
+def _build_command_invocation(command: str, context: ToolContext) -> tuple[list[str] | str, bool]:
+    """Choose a low-risk subprocess invocation where possible."""
+    if context.sandbox.use_docker:
+        return context.sandbox.prepare_command(command), True
+
+    builtin = _windows_builtin_command(command)
+    if builtin:
+        return builtin, False
+
+    argv = _split_simple_command(command)
+    if argv:
+        return argv, False
+
+    return context.sandbox.prepare_command(command), True
 
 def _validate_and_sanitize_external_tool_args(
     name: str,
@@ -617,10 +660,8 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                     f"Please try a different approach that doesn't require this command."
                 )
 
-            # 2. Sandbox wrapping
-            final_command = context.sandbox.prepare_command(command)
-
-            # 3. Execute
+            # 2. Execute simple commands without a shell. Composite commands still
+            # require approval via authorize_command() and run through the shell.
             logger.info("Executing command: %s", command)
             env = os.environ.copy()
             cwd = context.sandbox.root_str if context.sandbox.root else "."
@@ -637,8 +678,15 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 env["PATH"] = os.pathsep.join(bin_dirs) + os.pathsep + env.get("PATH", "")
 
             try:
+                final_command, use_shell = _build_command_invocation(command, context)
                 proc = subprocess.run(
-                    final_command, shell=True, capture_output=True, text=True, timeout=timeout, env=env,
+                    final_command,
+                    shell=use_shell,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env=env,
+                    cwd=cwd,
                 )
                 out = proc.stdout or ""
                 err = proc.stderr or ""
@@ -898,7 +946,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             try:
                 if short:
                     return build_repo_map_short(root)
-                return build_repo_map(root)
+                return build_repo_map(root, write_index=bool(args.get("write_index", False)))
             except Exception as e:
                 logger.error("repo_map error: %s", e)
                 return f"Error building repo map: {e}"

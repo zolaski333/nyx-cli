@@ -552,12 +552,14 @@ def _get_ast_symbols(root: Path, max_files: int = 15) -> str:
     return "\n".join(lines)
 
 
-def build_repo_map(root: str | Path | None = None) -> str:
+def build_repo_map(root: str | Path | None = None, write_index: bool = False) -> str:
     """
     Build a complete repository map as a formatted string.
 
     Args:
         root: Project root directory. Defaults to current working directory.
+        write_index: If True, write .nyx/repo_graph.json. Defaults to False
+            so read-only tools such as repo_map have no filesystem side effects.
 
     Returns:
         A formatted string containing the repository map.
@@ -567,11 +569,11 @@ def build_repo_map(root: str | Path | None = None) -> str:
     if not root.is_dir():
         return f"Error: '{root}' is not a valid directory."
 
-    # Index static dependencies
-    try:
-        index_dependencies(root)
-    except Exception as e:
-        logger.debug("Failed to index dependencies: %s", e)
+    if write_index:
+        try:
+            index_dependencies(root)
+        except Exception as e:
+            logger.debug("Failed to index dependencies: %s", e)
 
     parts: list[str] = []
     parts.append("=" * 60)

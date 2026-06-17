@@ -1,9 +1,0 @@
-# Nyx Patch Record
-# File: /tmp/tmpybsjm4wl/test.txt
-# Type: create
-# Time: 2026-06-14 12:53:40
-# Success: True
-# Summary: CREATE  /tmp/tmpybsjm4wl/test.txt (11 bytes)
-# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781434421_tmp_tmpybsjm4wl_test.txt_521e4918.bak
-
-(new file: /tmp/tmpybsjm4wl/test.txt)

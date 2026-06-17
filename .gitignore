@@ -32,6 +32,10 @@ Thumbs.db
 
 # Nyx audit logs (NDJSON files — every tool call, permission check, file operation)
 .nyx/audit/
+.nyx/patches/
+.nyx/rollback/
+.nyx/repo_graph.json
+.nyx/nyx_log.ndjson
 
 # Testing
 .pytest_cache/

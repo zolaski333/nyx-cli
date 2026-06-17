@@ -123,6 +123,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "temperature": 0.7,
     "mcp_servers": {},
     "skills_dir": "skills",
+    "skills_enabled": True,
     "subagents_dir": "subagents",
     "web_search_enabled": True,
     "web_search_provider": "duckduckgo",
@@ -221,6 +222,7 @@ class Config:
     temperature: float = 0.7
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     skills_dir: str = ""
+    skills_enabled: bool = True
     subagents_dir: str = ""
     project_dir: str = ""
     web_search_enabled: bool = True

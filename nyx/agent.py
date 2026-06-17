@@ -265,6 +265,8 @@ class Agent:
         )
         self.on_token = on_token
         self.on_event = on_event
+        self._user_on_command_approval = on_command_approval
+        self._user_on_file_approval = on_file_approval
         self._on_command_approval = on_command_approval
         self._on_file_approval = on_file_approval
         self.context = AgentContext()
@@ -317,8 +319,9 @@ class Agent:
             use_git=True,
         )
 
-        # Collect all tools
-        self._all_tools: list[ToolDefinition] = list(BUILTIN_TOOLS)
+        # Collect base tools once; active tools are recalculated for each mode.
+        self._base_tools: list[ToolDefinition] = list(BUILTIN_TOOLS)
+        self._active_tools: list[ToolDefinition] = list(self._base_tools)
 
     def _emit(self, event_type: str, **payload: Any) -> None:
         """Emit a UI/logging event without coupling the agent to a renderer."""
@@ -342,34 +345,23 @@ class Agent:
 
     @property
     def on_command_approval(self) -> Callable[[str], tuple[bool, str]] | None:
-        return self._on_command_approval
+        return self._user_on_command_approval
 
     @on_command_approval.setter
     def on_command_approval(self, callback: Callable[[str], tuple[bool, str]] | None) -> None:
-        self._on_command_approval = callback
-        # Sync to PermissionManager so PROMPT-level shell commands can be approved
+        self._user_on_command_approval = callback
         if hasattr(self, "permissions"):
-            if callback:
-                def _pm_shell_callback(cat: str, desc: str, target: str) -> tuple[bool, str]:
-                    if cat == "shell":
-                        return callback(target)
-                    return True, ""
-                self.permissions.set_approval_callback(_pm_shell_callback)
-            else:
-                self.permissions.set_approval_callback(None)
+            self._refresh_autonomy_callbacks()
 
     @property
     def on_file_approval(self) -> Callable[[str, str, str], tuple[bool, str]] | None:
-        return self._on_file_approval
+        return self._user_on_file_approval
 
     @on_file_approval.setter
     def on_file_approval(self, callback: Callable[[str, str, str], tuple[bool, str]] | None) -> None:
-        self._on_file_approval = callback
-        # Sync to PatchTool so file writes go through the interactive prompt
-        if hasattr(self, "patch_tool"):
-            self.patch_tool.set_approval_callback(
-                self._file_approval_handler
-            )
+        self._user_on_file_approval = callback
+        if hasattr(self, "permissions"):
+            self._refresh_autonomy_callbacks()
 
     def _file_approval_handler(self, path: str, summary: str, diff: str) -> tuple[bool, str]:
         """Handle file operation approval requests from the PatchTool."""
@@ -398,7 +390,7 @@ class Agent:
                 )
 
             self.mcp.connect_all(self.config.mcp_servers)
-            self._all_tools.extend(self.mcp.get_tool_definitions())
+            self._base_tools.extend(self.mcp.get_tool_definitions())
 
         # Wire up subagent progress callback
         if self.json_logger and self.json_logger.enabled:
@@ -410,12 +402,14 @@ class Agent:
 
         # Skills
         skills_dir = self.config.skills_dir
-        if skills_dir:
+        if skills_dir and self.config.skills_enabled:
             logger.info("Loading skills from %s", skills_dir)
             self._emit("status", message="Loading skills...")
             skills_found = self.skills.discover(skills_dir)
             if skills_found:
-                self._all_tools.extend(self.skills.get_tool_definitions())
+                self._base_tools.extend(self.skills.get_tool_definitions())
+        elif skills_dir and not self.config.skills_enabled:
+            logger.info("Skills disabled by configuration; skipping %s", skills_dir)
 
         # Project directory / sandbox
         if self.config.project_dir:
@@ -452,10 +446,10 @@ class Agent:
         self.subagents.set_tool_executor(self._execute_tool)
         self.async_subagents.set_default_tools(self._subagent_tools)
         self.async_subagents.set_tool_executor(self._execute_tool)
-        logger.info("Subagent tools: %d (filtered from %d)", len(self._subagent_tools), len(self._all_tools))
+        logger.info("Subagent tools: %d (filtered from %d)", len(self._subagent_tools), len(self._active_tools))
 
-        logger.info("Total tools available: %d", len(self._all_tools))
-        self._emit("setup_complete", tool_count=len(self._all_tools))
+        logger.info("Total tools available: %d", len(self._active_tools))
+        self._emit("setup_complete", tool_count=len(self._active_tools))
 
         # -- ToolContext initialization --
         self.tool_context = ToolContext(
@@ -539,10 +533,12 @@ class Agent:
             self.context.add("system", suffix)
             logger.info("Mode '%s' system prompt injected", mode)
 
-        # 2. Filter tools for architect mode (read-only)
+        # 2. Recalculate active tools for the selected mode.
         if mode == "architect":
-            self._all_tools = [t for t in self._all_tools if t.name in ARCHITECT_TOOLS]
-            logger.info("Architect mode: tools filtered to %d read-only tools", len(self._all_tools))
+            self._active_tools = [t for t in self._base_tools if t.name in ARCHITECT_TOOLS]
+            logger.info("Architect mode: tools filtered to %d read-only tools", len(self._active_tools))
+        else:
+            self._active_tools = list(self._base_tools)
 
         # 3. Apply autonomy-level behaviour
         aut = AUTONOMY_CONFIGS[autonomy]
@@ -550,33 +546,47 @@ class Agent:
         self.max_depth = self.config.agent_max_depth * multiplier
         logger.info("Autonomy '%s': max_depth=%d", autonomy, self.max_depth)
 
-        if aut["auto_approve_files"]:
-            # Bypass interactive file-approval prompt — accept all writes silently
-            self._on_file_approval = lambda path, summary, diff: (True, "")
-            logger.info("Autonomy '%s': file writes auto-approved", autonomy)
-
-        if aut["auto_approve_commands"]:
-            # Bypass interactive command-approval prompt — accept all commands silently
-            self._on_command_approval = lambda cmd: (True, "")
-            # Also update PermissionManager callback so PROMPT-level rules pass through
-            self.permissions.set_approval_callback(
-                lambda cat, desc, target: (True, "")
-            )
-            logger.info("Autonomy '%s': commands auto-approved", autonomy)
-        elif aut["auto_approve_files"] and not aut["auto_approve_commands"]:
-            # Sync PermissionManager for file category only
-            orig_pm_cb = self.permissions._approval_callback
-
-            def _selective_pm_callback(cat: str, desc: str, target: str) -> tuple[bool, str]:
-                if cat == "filesystem":
-                    return True, ""
-                if orig_pm_cb:
-                    return orig_pm_cb(cat, desc, target)
-                return False, "No approval mechanism configured."
-
-            self.permissions.set_approval_callback(_selective_pm_callback)
+        self._refresh_autonomy_callbacks()
+        self._subagent_tools = self._get_subagent_tools()
+        if hasattr(self, "subagents"):
+            self.subagents.set_default_tools(self._subagent_tools)
+        if hasattr(self, "async_subagents"):
+            self.async_subagents.set_default_tools(self._subagent_tools)
+        if self.tool_context:
+            self.tool_context.subagent_tools = self._subagent_tools
 
         self._emit("mode", mode=mode, autonomy=autonomy, max_depth=self.max_depth)
+
+    def _refresh_autonomy_callbacks(self) -> None:
+        """Recalculate effective callbacks from user callbacks and autonomy level."""
+        autonomy = self.config.agent_autonomy.lower()
+        aut = AUTONOMY_CONFIGS.get(autonomy, AUTONOMY_CONFIGS["ask"])
+
+        self._on_file_approval = (
+            (lambda path, summary, diff: (True, ""))
+            if aut["auto_approve_files"]
+            else self._user_on_file_approval
+        )
+        self._on_command_approval = (
+            (lambda cmd: (True, ""))
+            if aut["auto_approve_commands"]
+            else self._user_on_command_approval
+        )
+
+        def _pm_callback(cat: str, desc: str, target: str) -> tuple[bool, str]:
+            if cat == "filesystem" and aut["auto_approve_files"]:
+                return True, ""
+            if cat == "shell" and aut["auto_approve_commands"]:
+                return True, ""
+            if cat == "shell" and self._user_on_command_approval:
+                return self._user_on_command_approval(target)
+            if cat == "filesystem" and self._user_on_file_approval:
+                return self._user_on_file_approval(target, desc, "")
+            return False, "No approval mechanism configured."
+
+        self.permissions.set_approval_callback(_pm_callback)
+        if hasattr(self, "patch_tool"):
+            self.patch_tool.set_approval_callback(self._file_approval_handler)
 
     def switch_mode(self, mode: str) -> str:
         """Switch the agent mode at runtime. Returns a status message."""
@@ -637,13 +647,13 @@ class Agent:
         They cannot spawn sub-subagents or auto-correct tests.
         """
         return [
-            t for t in self._all_tools
+            t for t in self._active_tools
             if t.name in self.SUBAGENT_TOOL_WHITELIST
         ]
 
     @property
     def tools(self) -> list[ToolDefinition]:
-        return self._all_tools
+        return self._active_tools
 
     @staticmethod
     def _tool_target(name: str, arguments: dict[str, Any]) -> str:

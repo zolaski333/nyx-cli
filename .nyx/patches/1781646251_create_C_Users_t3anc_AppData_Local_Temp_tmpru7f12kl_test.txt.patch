@@ -1,9 +1,0 @@
-# Nyx Patch Record
-# File: C:\Users\t3anc\AppData\Local\Temp\tmpru7f12kl\test.txt
-# Type: create
-# Time: 2026-06-16 23:44:11
-# Success: True
-# Summary: CREATE  C:\Users\t3anc\AppData\Local\Temp\tmpru7f12kl\test.txt (11 bytes)
-# Rollback: C:\Users\t3anc\OneDrive\Bureau\nyx-cli\.nyx\rollback\1781646251_C_Users_t3anc_AppData_Local_Temp_tmpru7f12kl_test.txt_521e4918.bak
-
-(new file: C:\Users\t3anc\AppData\Local\Temp\tmpru7f12kl\test.txt)

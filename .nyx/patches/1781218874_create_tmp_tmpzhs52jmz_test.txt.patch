@@ -1,9 +1,0 @@
-# Nyx Patch Record
-# File: /tmp/tmpzhs52jmz/test.txt
-# Type: create
-# Time: 2026-06-12 01:01:14
-# Success: True
-# Summary: CREATE  /tmp/tmpzhs52jmz/test.txt (11 bytes)
-# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781218874_tmp_tmpzhs52jmz_test.txt_521e4918.bak
-
-(new file: /tmp/tmpzhs52jmz/test.txt)

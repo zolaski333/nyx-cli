@@ -1,9 +1,0 @@
-# Nyx Patch Record
-# File: /tmp/tmpyao_cqg3/append.txt
-# Type: create
-# Time: 2026-06-12 00:59:51
-# Success: True
-# Summary: CREATE  /tmp/tmpyao_cqg3/append.txt (6 bytes)
-# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781218792_tmp_tmpyao_cqg3_append.txt_521e4918.bak
-
-(new file: /tmp/tmpyao_cqg3/append.txt)

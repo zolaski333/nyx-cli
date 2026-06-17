@@ -70,11 +70,10 @@ class AuditTrail:
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
-        if output_dir:
+        if output_dir and self._enabled:
             self._setup_file(output_dir)
-            if self._enabled:
-                self._worker_thread = threading.Thread(target=self._worker, daemon=True)
-                self._worker_thread.start()
+            self._worker_thread = threading.Thread(target=self._worker, daemon=True)
+            self._worker_thread.start()
 
     def _setup_file(self, output_dir: str | Path) -> None:
         """Set up the audit log file."""

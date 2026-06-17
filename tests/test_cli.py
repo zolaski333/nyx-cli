@@ -192,6 +192,7 @@ class TestArgumentParsing:
         assert "--no-stream" in result.stdout
         assert "--model" in result.stdout
         assert "--provider" in result.stdout
+        assert "doctor" in result.stdout
 
     def test_help_short(self):
         """-h should also display help."""
@@ -204,6 +205,14 @@ class TestArgumentParsing:
         result = _run_nyx("--version")
         assert result.returncode == 0
         assert "nyx " in result.stdout.lower()
+
+    def test_doctor_runs_without_api_key(self):
+        """doctor should diagnose setup without requiring an API key or LLM call."""
+        result = _run_nyx("doctor", env={"OPENROUTER_API_KEY": ""})
+        assert result.returncode == 0
+        assert "Nyx doctor" in result.stdout
+        assert "API key" in result.stdout
+        assert "missing" in result.stdout.lower()
 
     def test_module_execution_has_no_import_warning(self):
         """python -m nyx.cli should not warn about nyx.cli already being imported."""

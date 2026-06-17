@@ -1,9 +1,0 @@
-# Nyx Patch Record
-# File: /tmp/tmpjnp_n1dk/test.txt
-# Type: create
-# Time: 2026-06-14 13:02:45
-# Success: True
-# Summary: CREATE  /tmp/tmpjnp_n1dk/test.txt (11 bytes)
-# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781434966_tmp_tmpjnp_n1dk_test.txt_521e4918.bak
-
-(new file: /tmp/tmpjnp_n1dk/test.txt)

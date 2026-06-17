@@ -1,9 +1,0 @@
-# Nyx Patch Record
-# File: /tmp/tmprb7m7dqy/append.txt
-# Type: create
-# Time: 2026-06-12 00:59:12
-# Success: True
-# Summary: CREATE  /tmp/tmprb7m7dqy/append.txt (6 bytes)
-# Rollback: /home/noah/Bureau/nyx-cli/.nyx/rollback/1781218752_tmp_tmprb7m7dqy_append.txt_521e4918.bak
-
-(new file: /tmp/tmprb7m7dqy/append.txt)

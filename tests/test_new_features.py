@@ -49,6 +49,39 @@ class TestRepoMap:
         result = build_repo_map("/nonexistent/path/xyz123")
         assert "Error" in result
 
+    def test_build_repo_map_does_not_write_index_by_default(self):
+        """Repo map should be read-only unless write_index is explicit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+            (root / "demo.py").write_text("import os\n", encoding="utf-8")
+
+            result = build_repo_map(root)
+
+            assert "REPOSITORY MAP" in result
+            assert not (root / ".nyx" / "repo_graph.json").exists()
+
+    def test_repo_map_tool_does_not_write_index_in_architect_mode(self):
+        """The architect-allowed repo_map tool should not mutate the filesystem."""
+        from nyx.providers.base import ToolCall
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+            (root / "demo.py").write_text("import os\n", encoding="utf-8")
+            agent = Agent(Config(
+                openrouter_api_key="sk-test",
+                project_dir=str(root),
+                agent_mode="architect",
+                audit_enabled=False,
+            ))
+            agent.switch_mode("architect")
+
+            result = agent._execute_tool(ToolCall(id="1", name="repo_map", arguments={"path": str(root)}))
+
+            assert "REPOSITORY MAP" in result
+            assert not (root / ".nyx" / "repo_graph.json").exists()
+
     def test_build_repo_map_short(self):
         """Short map should be a one-liner."""
         result = build_repo_map_short(PROJECT_ROOT)
@@ -98,6 +131,33 @@ class TestRepoMap:
             assert "Class: Child (Parent)" in result
             assert "@decorator async method(self, x: int, y=1)" in result
             assert "@staticmethod func(a, b=True)" in result
+
+
+class TestSkillsConfig:
+    """Test skill loading safety switches."""
+
+    def test_agent_skips_skills_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir) / "skills"
+            skills_dir.mkdir()
+            (skills_dir / "sample.py").write_text(
+                "name = 'sample'\n"
+                "description = 'sample skill'\n"
+                "parameters = {'type': 'object', 'properties': {}}\n"
+                "def execute(arguments):\n"
+                "    return 'ok'\n",
+                encoding="utf-8",
+            )
+            config = Config(
+                openrouter_api_key="sk-test",
+                skills_dir=str(skills_dir),
+                skills_enabled=False,
+                audit_enabled=False,
+            )
+            agent = Agent(config)
+            agent.setup()
+
+            assert "skill_sample" not in {tool.name for tool in agent.tools}
 
 
 # =========================================================================

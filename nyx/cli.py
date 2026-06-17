@@ -7,6 +7,7 @@ Usage:
     nyx                               # Interactive chat mode
     nyx -p "refactor this file"       # Single prompt mode
     nyx --json                        # JSON output mode (CI/CD)
+    nyx doctor                        # Diagnose local setup without an LLM call
     nyx --help                         # Show help
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
@@ -925,6 +927,93 @@ def _handle_config_command(argv: list[str]) -> int:
     return 1
 
 
+def _load_raw_config_for_doctor(path: str | None = None) -> dict[str, Any]:
+    raw = dict(DEFAULT_CONFIG)
+    for cfg_path in Config._config_paths(path):
+        if cfg_path.exists():
+            try:
+                raw = Config._deep_merge(raw, _load_config_file(cfg_path))
+            except Exception as e:
+                raw.setdefault("_doctor_errors", []).append(f"Could not read {cfg_path}: {e}")
+    provider = os.environ.get("NYX_PROVIDER", "").strip()
+    model = os.environ.get("NYX_MODEL", "").strip()
+    if provider:
+        raw["provider"] = provider
+    if model:
+        raw["model"] = model
+    return raw
+
+
+def _run_doctor(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Diagnose a Nyx installation")
+    parser.add_argument("--config", type=str, default="", help="Path to config.json")
+    parser.add_argument("--dir", type=str, default="", help="Project directory to inspect")
+    parser.add_argument("--dev", action="store_true", help="Also check developer tools")
+    args = parser.parse_args(argv)
+
+    raw = _load_raw_config_for_doctor(args.config or None)
+    project_dir = Path(args.dir or os.getcwd()).resolve()
+    provider = str(raw.get("provider", "openrouter"))
+    model = str(raw.get("model", ""))
+    key_env = {
+        "openrouter": "OPENROUTER_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }.get(provider, f"{provider.upper()}_API_KEY")
+    api_key_configured = bool(os.environ.get(key_env) or raw.get(f"{provider}_api_key"))
+
+    def _tool_available(name: str) -> tuple[bool, str]:
+        path = shutil.which(name)
+        if path:
+            return True, path
+        try:
+            import importlib.util
+            if importlib.util.find_spec(name) is not None:
+                return True, f"python module '{name}'"
+        except Exception:
+            pass
+        return False, "not found"
+
+    pytest_ok, pytest_detail = _tool_available("pytest")
+    ruff_ok, ruff_detail = _tool_available("ruff")
+    mypy_ok, mypy_detail = _tool_available("mypy")
+
+    checks: list[tuple[str, bool, str]] = [
+        ("Python", sys.version_info >= (3, 10), sys.version.split()[0]),
+        ("Project directory", project_dir.exists() and project_dir.is_dir(), str(project_dir)),
+        ("Provider", bool(provider), provider or "not configured"),
+        ("Model", bool(model), model or "not configured"),
+        ("API key", api_key_configured, f"{key_env} {'set' if api_key_configured else 'missing'}"),
+        ("Rich", RICH_AVAILABLE, "available" if RICH_AVAILABLE else "not installed"),
+        ("git", shutil.which("git") is not None, shutil.which("git") or "not found"),
+        ("pytest", pytest_ok, pytest_detail),
+    ]
+
+    if args.dev:
+        checks.extend([
+            ("ruff", ruff_ok, ruff_detail),
+            ("mypy", mypy_ok, mypy_detail),
+        ])
+
+    print("Nyx doctor")
+    print(f"Config provider/model: {provider} / {model or '(none)'}")
+    print(f"Skills: {'enabled' if raw.get('skills_enabled', True) else 'disabled'}; trusted local Python code if enabled")
+    for name, ok, detail in checks:
+        mark = "OK" if ok else "WARN"
+        print(f"[{mark}] {name}: {detail}")
+
+    if raw.get("_doctor_errors"):
+        for error in raw["_doctor_errors"]:
+            print(f"[WARN] {error}")
+
+    if not api_key_configured:
+        print(f"Set {key_env} or configure a provider key before running prompts.")
+    if not args.dev:
+        print("Use `nyx doctor --dev` to check ruff and mypy.")
+
+    return 0
+
+
 def _setup_logging(verbose: bool = False) -> None:
     """Configure logging for the application."""
     level = logging.DEBUG if verbose else logging.WARNING
@@ -1001,6 +1090,9 @@ def main() -> None:
                 except Exception:
                     pass
 
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        sys.exit(_run_doctor(sys.argv[2:]))
+
     if len(sys.argv) > 1 and sys.argv[1] in {"init", "config"}:
         sys.exit(_handle_config_command(sys.argv[1:]))
 
@@ -1012,6 +1104,7 @@ def main() -> None:
             "  nyx                               Interactive mode\n"
             "  nyx -p 'list all files'           Single prompt\n"
             "  nyx --json -p 'list all files'    JSON output (CI/CD)\n"
+            "  nyx doctor                        Diagnose local setup\n"
             "  nyx --config ./myconf.json        Custom config\n"
             "  nyx --dir /path/to/project        Set working directory\n"
         ),

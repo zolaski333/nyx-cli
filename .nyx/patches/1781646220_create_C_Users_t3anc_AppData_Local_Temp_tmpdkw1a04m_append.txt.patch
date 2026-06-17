@@ -1,9 +1,0 @@
-# Nyx Patch Record
-# File: C:\Users\t3anc\AppData\Local\Temp\tmpdkw1a04m\append.txt
-# Type: create
-# Time: 2026-06-16 23:43:39
-# Success: True
-# Summary: CREATE  C:\Users\t3anc\AppData\Local\Temp\tmpdkw1a04m\append.txt (6 bytes)
-# Rollback: C:\Users\t3anc\OneDrive\Bureau\nyx-cli\.nyx\rollback\1781646220_C_Users_t3anc_AppData_Local_Temp_tmpdkw1a04m_append.txt_521e4918.bak
-
-(new file: C:\Users\t3anc\AppData\Local\Temp\tmpdkw1a04m\append.txt)

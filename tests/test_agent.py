@@ -202,6 +202,38 @@ class TestAgentSandbox:
         result = self.agent._execute_tool(tc)
         assert "denied" in result.lower()
 
+    def test_autonomy_restores_command_prompt(self):
+        """ask -> yolo -> ask should restore the user's command approval callback."""
+        calls = []
+        self.agent.on_command_approval = lambda cmd: (calls.append(cmd) or (False, "ask restored"))
+
+        self.agent.switch_autonomy("yolo")
+        tc = ToolCall(id="9", name="execute_command", arguments={"command": "echo yolo && echo ok"})
+        yolo_result = self.agent._execute_tool(tc)
+        assert "ask restored" not in yolo_result
+
+        self.agent.switch_autonomy("ask")
+        tc = ToolCall(id="10", name="execute_command", arguments={"command": "echo ask && echo blocked"})
+        ask_result = self.agent._execute_tool(tc)
+        assert "ask restored" in ask_result
+        assert calls
+
+    def test_mode_switch_restores_tools_and_subagent_tools(self):
+        """Architect mode should restrict tools without destroying the full tool list."""
+        original_names = {tool.name for tool in self.agent.tools}
+        assert "execute_command" in original_names
+
+        self.agent.switch_mode("architect")
+        architect_names = {tool.name for tool in self.agent.tools}
+        assert "repo_map" in architect_names
+        assert "execute_command" not in architect_names
+        assert {tool.name for tool in self.agent._subagent_tools}.issubset(architect_names)
+
+        self.agent.switch_mode("chat")
+        restored_names = {tool.name for tool in self.agent.tools}
+        assert original_names == restored_names
+        assert "execute_command" in {tool.name for tool in self.agent._subagent_tools}
+
     def test_execute_command_virtualenv_path(self):
         """execute_command should prepend local venv/bin to PATH."""
         import tempfile
