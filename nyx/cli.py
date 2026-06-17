@@ -1208,7 +1208,17 @@ def main() -> None:
 
     # Build agent with all subsystems
     provider = get_provider(config)
-    mcp = MCPManager()
+    mcp = MCPManager(
+        request_timeout=config.mcp_request_timeout,
+        connect_timeout=config.mcp_connect_timeout,
+        max_response_chars=config.mcp_max_response_chars,
+        restart_on_failure=config.mcp_restart_on_failure,
+        sandbox_enabled=config.mcp_sandbox_enabled,
+        sandbox_docker_image=config.mcp_sandbox_docker_image,
+        sandbox_network=config.mcp_sandbox_network,
+        sandbox_read_only=config.mcp_sandbox_read_only,
+        sandbox_project_dir=config.project_dir,
+    )
     skills = SkillManager(
         config.skills_dir,
         process_isolation=config.skills_process_isolation,

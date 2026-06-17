@@ -17,6 +17,16 @@
       "pass_env": []
     }
   },
+  "mcp": {
+    "request_timeout": 30,
+    "connect_timeout": 30,
+    "max_response_chars": 20000,
+    "restart_on_failure": true,
+    "sandbox_enabled": false,
+    "sandbox_docker_image": "python:3.11-slim-buster",
+    "sandbox_network": "none",
+    "sandbox_read_only": false
+  },
   "skills_dir": "skills",
   "skills_enabled": true,
   "skills": {

@@ -102,6 +102,64 @@ while True:
         }})
 """
 
+NO_RESPONSE_MCP_SERVER = """
+import time
+time.sleep(10)
+"""
+
+LOUD_MCP_SERVER = """
+import json
+import sys
+
+def read_line():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line.strip())
+
+def write_line(data):
+    sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\\n")
+    sys.stdout.flush()
+
+sys.stderr.write("x" * 200000)
+sys.stderr.flush()
+req = read_line()
+write_line({"jsonrpc": "2.0", "id": req["id"], "result": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {"tools": {}},
+}})
+req = read_line()
+req = read_line()
+write_line({"jsonrpc": "2.0", "id": req["id"], "result": {"tools": []}})
+"""
+
+INVALID_TOOLS_MCP_SERVER = """
+import json
+import sys
+
+def read_line():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line.strip())
+
+def write_line(data):
+    sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\\n")
+    sys.stdout.flush()
+
+req = read_line()
+write_line({"jsonrpc": "2.0", "id": req["id"], "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}}})
+read_line()
+req = read_line()
+write_line({"jsonrpc": "2.0", "id": req["id"], "result": {"tools": [
+    {"name": "../bad", "description": "bad", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "ok_tool", "description": "ok", "inputSchema": {"type": "array"}}
+]}})
+while True:
+    req = read_line()
+    write_line({"jsonrpc": "2.0", "id": req["id"], "result": {"content": [{"type": "text", "text": "y" * 100}]}})
+"""
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -264,6 +322,86 @@ class TestMCPSession:
         inherited = {k: v for k, v in os.environ.items() if k in SAFE_INHERITED_ENV}
         assert "OPENAI_API_KEY" not in inherited
 
+    def test_connect_timeout_does_not_hang(self):
+        """A server that never responds should fail within the configured timeout."""
+        session = MCPSession("slow", {
+            "command": sys.executable,
+            "args": ["-c", NO_RESPONSE_MCP_SERVER],
+            "connect_timeout": 0.1,
+            "request_timeout": 0.1,
+        })
+        with pytest.raises(TimeoutError):
+            session.connect()
+        session.close()
+
+    def test_stderr_is_drained_during_connect(self):
+        """Verbose stderr should not block a server from completing initialization."""
+        session = MCPSession("loud", {
+            "command": sys.executable,
+            "args": ["-c", LOUD_MCP_SERVER],
+            "connect_timeout": 2,
+        })
+        tools = session.connect()
+        assert tools == []
+        assert session.status == "connected"
+        session.close()
+
+    def test_invalid_tools_are_skipped_and_output_is_truncated(self):
+        """Invalid tool names/schemas should be handled defensively."""
+        session = MCPSession("validated", {
+            "command": sys.executable,
+            "args": ["-c", INVALID_TOOLS_MCP_SERVER],
+            "max_response_chars": 10,
+        })
+        tools = session.connect()
+        assert [t.name for t in tools] == ["ok_tool"]
+        assert tools[0].input_schema == {"type": "object", "properties": {}}
+        result = tools[0].call_result({})
+        assert result.ok
+        assert result.output == "y" * 10
+        assert result.truncated is True
+        session.close()
+
+    def test_invalid_cwd_is_rejected(self):
+        """Invalid working directories should fail before process start."""
+        session = MCPSession("badcwd", {
+            "command": sys.executable,
+            "cwd": "Z:/definitely/not/a/real/path",
+        })
+        with pytest.raises(RuntimeError):
+            session._build_process_invocation()
+
+    def test_docker_sandbox_invocation_is_built_without_secret_env(self, monkeypatch, tmp_path):
+        """Docker sandbox mode should build a stdio-friendly isolated invocation."""
+        monkeypatch.setattr("nyx.mcp_client.shutil.which", lambda name: "docker" if name == "docker" else None)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+        session = MCPSession("boxed", {
+            "command": "python",
+            "args": ["server.py"],
+            "env": {"TOKEN": "explicit"},
+            "pass_env": ["PATH"],
+            "sandbox": {
+                "enabled": True,
+                "use_docker": True,
+                "project_dir": str(tmp_path),
+                "docker_image": "python:3.11-slim",
+                "network": "none",
+                "read_only": True,
+            },
+        })
+
+        argv, env, cwd = session._build_process_invocation()
+
+        assert argv[:4] == ["docker", "run", "--rm", "-i"]
+        assert "--network" in argv
+        assert "none" in argv
+        assert "--read-only" in argv
+        assert "python:3.11-slim" in argv
+        assert "python" in argv[-1]
+        assert "server.py" in argv[-1]
+        assert "OPENAI_API_KEY" not in env
+        assert cwd is None
+
 
 
 # =========================================================================
@@ -291,6 +429,35 @@ class TestMCPManager:
             },
         })
         assert len(tools) == 0
+
+    def test_manager_injects_global_sandbox_config(self, monkeypatch, tmp_path):
+        """Global MCP sandbox settings should be applied to server configs."""
+        captured = {}
+
+        class FakeSession:
+            def __init__(self, name, config):
+                captured["name"] = name
+                captured["config"] = config
+
+            def connect(self):
+                return []
+
+        monkeypatch.setattr("nyx.mcp_client.MCPSession", FakeSession)
+        manager = MCPManager(
+            sandbox_enabled=True,
+            sandbox_docker_image="python:3.11-slim",
+            sandbox_project_dir=str(tmp_path),
+            sandbox_read_only=True,
+        )
+        manager.connect_all({"boxed": {"command": "python"}})
+
+        assert captured["name"] == "boxed"
+        sandbox = captured["config"]["sandbox"]
+        assert sandbox["enabled"] is True
+        assert sandbox["use_docker"] is True
+        assert sandbox["docker_image"] == "python:3.11-slim"
+        assert sandbox["read_only"] is True
+        assert sandbox["project_dir"] == str(tmp_path)
 
     def test_get_tool_definitions(self):
         """Should return ToolDefinition list."""

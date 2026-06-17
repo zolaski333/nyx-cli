@@ -255,7 +255,17 @@ class Agent:
     ) -> None:
         self.config = config
         self.provider = provider or get_provider(config)
-        self.mcp = mcp_manager or MCPManager()
+        self.mcp = mcp_manager or MCPManager(
+            request_timeout=config.mcp_request_timeout,
+            connect_timeout=config.mcp_connect_timeout,
+            max_response_chars=config.mcp_max_response_chars,
+            restart_on_failure=config.mcp_restart_on_failure,
+            sandbox_enabled=config.mcp_sandbox_enabled,
+            sandbox_docker_image=config.mcp_sandbox_docker_image,
+            sandbox_network=config.mcp_sandbox_network,
+            sandbox_read_only=config.mcp_sandbox_read_only,
+            sandbox_project_dir=config.project_dir,
+        )
         self.skills = skill_manager or SkillManager(
             config.skills_dir,
             process_isolation=config.skills_process_isolation,

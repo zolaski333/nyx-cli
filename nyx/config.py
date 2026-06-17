@@ -122,6 +122,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_tokens": 4096,
     "temperature": 0.7,
     "mcp_servers": {},
+    "mcp": {
+        "request_timeout": 30,
+        "connect_timeout": 30,
+        "max_response_chars": 20000,
+        "restart_on_failure": True,
+        "sandbox_enabled": False,
+        "sandbox_docker_image": "python:3.11-slim-buster",
+        "sandbox_network": "none",
+        "sandbox_read_only": False,
+    },
     "skills_dir": "skills",
     "skills_enabled": True,
     "skills": {
@@ -230,6 +240,14 @@ class Config:
     max_tokens: int = 4096
     temperature: float = 0.7
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    mcp_request_timeout: float = 30
+    mcp_connect_timeout: float = 30
+    mcp_max_response_chars: int = 20000
+    mcp_restart_on_failure: bool = True
+    mcp_sandbox_enabled: bool = False
+    mcp_sandbox_docker_image: str = "python:3.11-slim-buster"
+    mcp_sandbox_network: str = "none"
+    mcp_sandbox_read_only: bool = False
     skills_dir: str = ""
     skills_enabled: bool = True
     skills_process_isolation: bool = True
@@ -332,6 +350,16 @@ class Config:
 
         # 5. Flatten nested config sections into top-level fields
         cls._flatten_nested(raw, "sandbox", ["enabled", "auto_chdir", "allow_paths", "deny_paths", "use_docker", "docker_image"])
+        cls._flatten_nested(raw, "mcp", [
+            "request_timeout",
+            "connect_timeout",
+            "max_response_chars",
+            "restart_on_failure",
+            "sandbox_enabled",
+            "sandbox_docker_image",
+            "sandbox_network",
+            "sandbox_read_only",
+        ])
         cls._flatten_nested(raw, "permissions", ["shell", "filesystem"])
         cls._flatten_nested(raw, "audit", ["enabled", "output_dir", "max_file_size_mb"])
         cls._flatten_nested(raw, "json_logging", ["enabled", "output_path", "log_to_stderr"])

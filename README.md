@@ -287,6 +287,25 @@ Connect [Model Context Protocol](https://modelcontextprotocol.io) stdio servers:
 
 Nyx supports stdio MCP servers. SSE/streamable HTTP transport is not currently implemented. Nyx does not pass the full parent environment to MCP servers by default. Put required tokens in the server's explicit `env` block, or list non-secret variables in `pass_env`.
 
+MCP client robustness settings:
+
+```json
+{
+  "mcp": {
+    "request_timeout": 30,
+    "connect_timeout": 30,
+    "max_response_chars": 20000,
+    "restart_on_failure": true,
+    "sandbox_enabled": false,
+    "sandbox_docker_image": "python:3.11-slim-buster",
+    "sandbox_network": "none",
+    "sandbox_read_only": false
+  }
+}
+```
+
+The stdio client drains stdout and stderr in background threads, serializes requests per server, validates server/tool names, limits tool output size, and can restart a failed server once before returning an error. MCP servers can also be launched through Docker/Podman by enabling the MCP sandbox globally or with a per-server `sandbox` block.
+
 ### 🎯 Skill System
 
 Create Python skills in the `skills/` directory — their metadata is auto-discovered and exposed as tools:
@@ -439,7 +458,7 @@ Priority chain: **Environment variables > config.json > Defaults**
 - File modifications are guarded by sandbox checks and approval prompts, but the project is still experimental.
 - Simple shell commands run without a shell where practical. Composite commands and shell-control operators such as `&&`, `|`, redirection and command substitution require approval.
 - MCP servers receive a minimal environment by default; secrets are not inherited automatically.
-- MCP servers are local processes and can perform whatever their implementation allows. Only configure servers you trust.
+- MCP servers are local processes and can perform whatever their implementation allows. Nyx adds timeouts, output limits, restart handling, process-tree termination, and optional Docker/Podman sandbox execution around them, but you should still only configure servers you trust.
 - Python skills are discovered without import and execute in a timeout-bounded worker process by default, but they still run as trusted local code under the same OS user.
 - `--yolo` disables approval prompts and should only be used in disposable or fully trusted projects.
 
