@@ -42,6 +42,27 @@ def truncate_output(text: str, max_lines: int = 200, head_lines: int = 50, tail_
     return "\n".join(head) + middle + "\n".join(tail)
 
 
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    """Safely parse a boolean value from tool arguments.
+
+    Raises ValueError for unrecognized string representations or other invalid types.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        val_lower = value.strip().lower()
+        if val_lower in ("true", "1", "yes", "on", "t", "y"):
+            return True
+        if val_lower in ("false", "0", "no", "off", "f", "n", ""):
+            return False
+        raise ValueError(f"Invalid boolean value: {value!r}")
+    raise ValueError(f"Invalid type for boolean parsing: {type(value).__name__} ({value!r})")
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
@@ -976,7 +997,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             try:
                 if short:
                     return build_repo_map_short(root)
-                return build_repo_map(root, write_index=bool(args.get("write_index", False)))
+                return build_repo_map(root, write_index=_parse_bool(args.get("write_index"), False))
             except Exception as e:
                 logger.error("repo_map error: %s", e)
                 return f"Error building repo map: {e}"
@@ -1083,9 +1104,9 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             timeout = args.get("timeout", 120)
             fix_timeout = int(args.get("fix_timeout", 180) or 180)
             subagent_max_steps = int(args.get("subagent_max_steps", 12) or 12)
-            rollback_on_regression = bool(args.get("rollback_on_regression", True))
-            require_changes = bool(args.get("require_changes", True))
-            stop_on_stall = bool(args.get("stop_on_stall", True))
+            rollback_on_regression = _parse_bool(args.get("rollback_on_regression"), True)
+            require_changes = _parse_bool(args.get("require_changes"), True)
+            stop_on_stall = _parse_bool(args.get("stop_on_stall"), True)
             root = Path(context.config.project_dir).resolve() if context.config.project_dir else Path(".").resolve()
 
             def _fix_with_subagent(
@@ -1134,6 +1155,9 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                         )
                     )
                     if result.error:
+                        if result.status == "timed_out" or "timeout" in str(result.error).lower():
+                            logger.warning("Subagent test fixer timed out after %s seconds.", attempt_timeout or fix_timeout)
+                            return ""
                         return f"Subagent error: {result.error}"
                     return result.output[:500]
                 except Exception as e:

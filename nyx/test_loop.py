@@ -218,6 +218,11 @@ def run_tests(
     """
     Run tests and return structured results.
 
+    Note:
+        This function uses shell=True to run test commands. This is acceptable
+        for an experimental agentic CLI to allow flexible shell pipelines and
+        composability of test runners, but means command inputs must be trusted.
+
     Args:
         command: Specific test command. If None, auto-discover.
         root: Project root directory.
@@ -276,6 +281,8 @@ def run_tests(
         env["PATH"] = os.pathsep.join(bin_dirs) + os.pathsep + env.get("PATH", "")
 
     try:
+        # We run the command with shell=True to allow complex/composite commands
+        # and shell features in test execution (e.g. environment variable interpolation, piping).
         proc = subprocess.run(
             command,
             shell=True,
@@ -526,9 +533,33 @@ class CorrectionAttempt:
 
 
 @dataclass
+class _FileMetadata:
+    size: int
+    mtime_ns: int
+    partial_hash: str | None = None
+
+
+def _get_partial_hash(path: Path, size: int) -> str | None:
+    try:
+        with open(path, "rb") as f:
+            if size <= 2048:
+                content = f.read()
+            else:
+                head = f.read(1024)
+                f.seek(max(0, size - 1024))
+                tail = f.read(1024)
+                content = head + tail
+            import hashlib
+            return hashlib.sha256(content).hexdigest()
+    except OSError:
+        return None
+
+
+@dataclass
 class _WorkspaceSnapshot:
     root: Path
     files: dict[str, bytes | None]
+    skipped_files: dict[str, _FileMetadata] = field(default_factory=dict)
     truncated: bool = False
 
     @classmethod
@@ -541,27 +572,65 @@ class _WorkspaceSnapshot:
         max_file_bytes: int = 2_000_000,
     ) -> "_WorkspaceSnapshot":
         files: dict[str, bytes | None] = {}
+        skipped_files: dict[str, _FileMetadata] = {}
         total_bytes = 0
         truncated = False
         for path in _iter_snapshot_files(root):
             rel = path.relative_to(root).as_posix()
             try:
-                size = path.stat().st_size
+                stat_res = path.stat()
+                size = stat_res.st_size
+                mtime_ns = stat_res.st_mtime_ns
             except OSError:
+                skipped_files[rel] = _FileMetadata(size=-1, mtime_ns=-1)
                 continue
+
             if len(files) >= max_files or total_bytes + size > max_total_bytes or size > max_file_bytes:
                 truncated = True
+                partial_hash = _get_partial_hash(path, size)
+                skipped_files[rel] = _FileMetadata(size=size, mtime_ns=mtime_ns, partial_hash=partial_hash)
                 continue
+
             try:
                 files[rel] = path.read_bytes()
                 total_bytes += size
             except OSError:
+                partial_hash = _get_partial_hash(path, size)
+                skipped_files[rel] = _FileMetadata(size=size, mtime_ns=mtime_ns, partial_hash=partial_hash)
                 continue
-        return cls(root=root, files=files, truncated=truncated)
+        return cls(root=root, files=files, skipped_files=skipped_files, truncated=truncated)
 
     def changed_files(self, other: "_WorkspaceSnapshot") -> list[str]:
-        names = set(self.files) | set(other.files)
-        return sorted(name for name in names if self.files.get(name) != other.files.get(name))
+        all_names = (
+            set(self.files)
+            | set(self.skipped_files)
+            | set(other.files)
+            | set(other.skipped_files)
+        )
+        changed = []
+        for name in all_names:
+            in_self_files = name in self.files
+            in_self_skipped = name in self.skipped_files
+            in_other_files = name in other.files
+            in_other_skipped = name in other.skipped_files
+
+            present_self = in_self_files or in_self_skipped
+            present_other = in_other_files or in_other_skipped
+            if present_self != present_other:
+                changed.append(name)
+                continue
+
+            if in_self_files and in_other_files:
+                if self.files[name] != other.files[name]:
+                    changed.append(name)
+            elif in_self_skipped and in_other_skipped:
+                if self.skipped_files[name] != other.skipped_files[name]:
+                    changed.append(name)
+            else:
+                # One is in files, other is in skipped_files. Definitely changed.
+                changed.append(name)
+
+        return sorted(changed)
 
     def restore(self, changed_files: list[str]) -> list[str]:
         restored: list[str] = []
@@ -570,6 +639,9 @@ class _WorkspaceSnapshot:
             try:
                 target.relative_to(self.root)
             except ValueError:
+                continue
+            if rel in self.skipped_files:
+                logger.warning("Skipping restore of %s because it was not captured in the snapshot.", rel)
                 continue
             original = self.files.get(rel)
             try:
@@ -803,15 +875,28 @@ def auto_correct_loop(
             result.attempts.append(attempt)
             if stop_on_stall:
                 break
+            continue
 
         if rollback_on_regression and changed_files and after_score > before_score:
-            restored = before_snapshot.restore(changed_files)
-            attempt.rolled_back = bool(restored)
-            result.rolled_back = result.rolled_back or attempt.rolled_back
-            result.errors.append(
-                f"Iteration {iteration}: Correction regressed tests; rolled back {len(restored)} file(s)."
+            has_uncaptured = any(
+                rel in before_snapshot.skipped_files or rel in after_snapshot.skipped_files
+                for rel in changed_files
             )
-            result.final_result = run_tests(command=test_command, root=root, timeout=timeout)
+            if has_uncaptured:
+                logger.warning(
+                    "Regression detected, but automatic rollback refused because some changed files were not captured in the snapshot."
+                )
+                result.errors.append(
+                    f"Iteration {iteration}: Regression detected, but automatic rollback refused because some changed files were not captured in the snapshot."
+                )
+            else:
+                restored = before_snapshot.restore(changed_files)
+                attempt.rolled_back = bool(restored)
+                result.rolled_back = result.rolled_back or attempt.rolled_back
+                result.errors.append(
+                    f"Iteration {iteration}: Correction regressed tests; rolled back {len(restored)} file(s)."
+                )
+                result.final_result = run_tests(command=test_command, root=root, timeout=timeout)
             result.attempts.append(attempt)
             break
 
@@ -853,6 +938,59 @@ def auto_correct_loop(
     return result
 
 
+def _call_fix_function_inner(
+    fix_function: Callable,
+    failures: list[TestFailure],
+    raw_output: str,
+    history: list[dict],
+    fix_timeout: int | None,
+) -> str:
+    import inspect
+
+    try:
+        sig = inspect.signature(fix_function)
+        has_var_positional = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values())
+        pos_params = [
+            p for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        max_pos = len(pos_params)
+    except (ValueError, TypeError):
+        has_var_positional = True
+        max_pos = 4
+
+    if has_var_positional or max_pos >= 4:
+        try:
+            return str(fix_function(failures, raw_output, history, fix_timeout))
+        except TypeError as e:
+            if e.__traceback__ and e.__traceback__.tb_next is not None:
+                raise
+
+    if has_var_positional or max_pos >= 3:
+        try:
+            return str(fix_function(failures, raw_output, history))
+        except TypeError as e:
+            if e.__traceback__ and e.__traceback__.tb_next is not None:
+                raise
+
+    return str(fix_function(failures, raw_output))
+
+
+def _multiprocess_fix_worker(
+    queue,
+    fix_function: Callable,
+    failures: list[TestFailure],
+    raw_output: str,
+    history: list[dict],
+    fix_timeout: int | None,
+) -> None:
+    try:
+        res = _call_fix_function_inner(fix_function, failures, raw_output, history, fix_timeout)
+        queue.put({"ok": True, "result": res})
+    except BaseException as e:
+        queue.put({"ok": False, "error": e})
+
+
 def _call_fix_function(
     fix_function: Callable,
     failures: list[TestFailure],
@@ -860,13 +998,48 @@ def _call_fix_function(
     history: list[dict],
     fix_timeout: int | None,
 ) -> str:
-    try:
-        return str(fix_function(failures, raw_output, history, fix_timeout))
-    except TypeError:
+    if fix_timeout is not None and fix_timeout > 0:
+        import pickle
+        is_picklable = False
         try:
-            return str(fix_function(failures, raw_output, history))
-        except TypeError:
-            return str(fix_function(failures, raw_output))
+            pickle.dumps(fix_function)
+            is_picklable = True
+        except Exception:
+            pass
+
+        if is_picklable:
+            import multiprocessing as mp
+            ctx = mp.get_context("spawn")
+            queue = ctx.Queue()
+            p = ctx.Process(
+                target=_multiprocess_fix_worker,
+                args=(queue, fix_function, failures, raw_output, history, fix_timeout),
+            )
+            p.start()
+            p.join(timeout=fix_timeout)
+            if p.is_alive():
+                logger.warning("Fix function timed out after %s seconds and was terminated.", fix_timeout)
+                p.terminate()
+                p.join(timeout=1)
+                if p.is_alive():
+                    p.kill()
+                return ""
+            try:
+                val = queue.get_nowait()
+                if val["ok"]:
+                    return val["result"]
+                else:
+                    raise val["error"]
+            except Exception as e:
+                logger.error("Error running fix function in subprocess: %s", e)
+                return ""
+        else:
+            logger.warning(
+                "Fix function is not picklable. Enforcing synchronous execution without hard timeout to prevent thread leak."
+            )
+            return _call_fix_function_inner(fix_function, failures, raw_output, history, fix_timeout)
+    else:
+        return _call_fix_function_inner(fix_function, failures, raw_output, history, fix_timeout)
 
 
 def format_failures_for_llm(failures: list[TestFailure], raw_output: str) -> str:

@@ -28,10 +28,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nyx-cli/nyx"
-Repository = "https://github.com/nyx-cli/nyx"
-Documentation = "https://github.com/nyx-cli/nyx#readme"
-Issues = "https://github.com/nyx-cli/nyx/issues"
+Homepage = "https://github.com/zolaski333/nyx-cli"
+Repository = "https://github.com/zolaski333/nyx-cli"
+Documentation = "https://github.com/zolaski333/nyx-cli#readme"
+Issues = "https://github.com/zolaski333/nyx-cli/issues"
 
 [project.optional-dependencies]
 tui = ["rich>=13.0.0"]

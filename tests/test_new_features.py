@@ -27,8 +27,11 @@ from nyx.agent import Agent, AgentContext
 from nyx.config import Config
 from nyx.providers.base import ToolDefinition
 
-# Project root derived from test file location (more reliable than cwd)
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+
+def _picklable_slow_fix(failures, raw_output, history=None, timeout=None):
+    time.sleep(1.0)
+    return "slow fix"
 
 
 # =========================================================================
@@ -567,6 +570,115 @@ FAILED tests/test_memory.py::test_save_and_load - KeyError: 'missing_key'
             assert correction.attempts[0].rolled_back
             assert flag.read_text(encoding="utf-8") == "one"
 
+    def test_auto_correct_loop_refuses_rollback_for_skipped_large_file(self):
+        """A rollback should be refused if a changed file was not captured due to size limits."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flag = root / "large_flag.txt"
+            # Write 2,000,001 bytes to exceed max_file_bytes (2_000_000)
+            flag.write_text("x" * 2_000_001, encoding="utf-8")
+            command = (
+                f'"{sys.executable}" -c "from pathlib import Path; import sys; '
+                "txt=Path('large_flag.txt').read_text().strip(); "
+                "print('FAILED test_a.py::test_a - AssertionError: first'); "
+                "print('FAILED test_b.py::test_b - AssertionError: second') if len(txt) < 100 else None; "
+                "sys.exit(1)\""
+            )
+
+            def fix(failures, raw_output, history=None):
+                flag.write_text("small content", encoding="utf-8")
+                return "shrink the file"
+
+            correction = auto_correct_loop(
+                fix_function=fix,
+                root=root,
+                test_command=command,
+                max_iterations=2,
+                require_changes=True,
+                rollback_on_regression=True,
+            )
+
+            assert not correction.success
+            assert not correction.rolled_back
+            assert flag.exists()
+            assert flag.read_text(encoding="utf-8") == "small content"
+            assert any("rollback refused" in err for err in correction.errors)
+
+    def test_changed_files_detects_skipped_large_file_change(self):
+        """changed_files() should detect a change when a large file is modified to another large file."""
+        from nyx.test_loop import _WorkspaceSnapshot
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            large_file = root / "large.txt"
+            # Write 2,000,001 bytes
+            large_file.write_text("x" * 2_000_001, encoding="utf-8")
+
+            snap1 = _WorkspaceSnapshot.capture(root)
+            assert "large.txt" in snap1.skipped_files
+            assert "large.txt" not in snap1.files
+
+            # Modify to another large content (same size, different content)
+            large_file.write_text("y" * 2_000_001, encoding="utf-8")
+            snap2 = _WorkspaceSnapshot.capture(root)
+            assert "large.txt" in snap2.skipped_files
+
+            changes = snap1.changed_files(snap2)
+            assert "large.txt" in changes
+
+    def test_auto_correct_loop_refuses_rollback_for_large_to_large_file_change(self):
+        """A rollback should be refused if a large file is modified to another large file, causing a regression."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flag = root / "large_flag.txt"
+            flag.write_text("x" * 2_000_001, encoding="utf-8")
+
+            command = (
+                f'"{sys.executable}" -c "from pathlib import Path; import sys; '
+                "txt=Path('large_flag.txt').read_text().strip(); "
+                "print('FAILED test_a.py::test_a - AssertionError: first'); "
+                "print('FAILED test_b.py::test_b - AssertionError: second') if 'y' in txt else None; "
+                "sys.exit(1)\""
+            )
+
+            def fix(failures, raw_output, history=None):
+                flag.write_text("y" * 2_000_001, encoding="utf-8")
+                return "change large file content"
+
+            correction = auto_correct_loop(
+                fix_function=fix,
+                root=root,
+                test_command=command,
+                max_iterations=2,
+                require_changes=True,
+                rollback_on_regression=True,
+            )
+
+            assert not correction.success
+            assert not correction.rolled_back
+            # The changes should be detected, so require_changes does not fail.
+            # However, the rollback should be refused because the file was not captured.
+            assert any("rollback refused" in err for err in correction.errors)
+            assert not any("no source files changed" in err for err in correction.errors)
+
+    def test_auto_correct_loop_enforces_fix_timeout(self):
+        """auto_correct_loop should interrupt the fix function if it exceeds fix_timeout."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            command = f'"{sys.executable}" -c "import sys; print(\'FAILED test_x.py::test_x - AssertionError: fail\'); sys.exit(1)"'
+
+            started = time.monotonic()
+            correction = auto_correct_loop(
+                fix_function=_picklable_slow_fix,
+                root=root,
+                test_command=command,
+                max_iterations=1,
+                fix_timeout=0.1,
+            )
+            elapsed = time.monotonic() - started
+            assert elapsed < 2.0
+            assert not correction.success
+            assert any("Fix function returned no changes" in err for err in correction.errors)
+
     def test_auto_correct_loop_detects_no_file_changes_when_required(self):
         """Reported fixes without source changes should be marked as stalled."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -585,6 +697,24 @@ FAILED tests/test_memory.py::test_save_and_load - KeyError: 'missing_key'
             assert not correction.success
             assert correction.attempts[0].stalled
             assert "no source files changed" in "\n".join(correction.errors)
+
+    def test_auto_correct_loop_no_duplicate_attempts_when_stalled(self):
+        """Attempts should not be duplicated when require_changes is violated and stop_on_stall is False."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            command = f'"{sys.executable}" -c "import sys; print(\'FAILED test_x.py::test_x - AssertionError: nope\'); sys.exit(1)"'
+
+            correction = auto_correct_loop(
+                fix_function=lambda failures, raw_output, history=None: "claimed fix",
+                root=root,
+                test_command=command,
+                max_iterations=2,
+                require_changes=True,
+                stop_on_stall=False,
+            )
+
+            assert len(correction.attempts) == 2
+            assert all(att.stalled for att in correction.attempts)
 
 
 # =========================================================================
@@ -847,6 +977,114 @@ class TestSubagentControlledTools:
         assert result.timed_out == 1
         assert result.failed == 1
         assert result.results[0].status == "timed_out"
+
+    def test_subagent_manager_timeout_in_process(self):
+        """SubagentManager should timeout tasks when process_isolation is False using ThreadPoolExecutor."""
+        from nyx.providers.base import BaseLLMProvider, LLMResponse
+
+        class SlowProvider(BaseLLMProvider):
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                time.sleep(1)
+                return LLMResponse(content="done", usage={"total_tokens": 1})
+
+        manager = SubagentManager(self.config, process_isolation=False)
+        agent = Subagent(name="slow_agent", config=self.config, provider=SlowProvider(self.config))
+        manager._subagents["slow_agent"] = agent
+
+        started = time.monotonic()
+        result = manager.run_task(SubagentTask(name="slow_agent", task="work", timeout_seconds=0.1))
+
+        assert time.monotonic() - started > 0.9
+        assert result.status == "completed"
+        assert result.output == "done"
+
+    def test_subagent_in_process_timeout_enforced(self):
+        """Subagent should enforce timeout_seconds inside the execution loop when running in-process."""
+        from nyx.providers.base import BaseLLMProvider, LLMResponse, ToolCall, ToolDefinition
+
+        class MultiStepSlowProvider(BaseLLMProvider):
+            def __init__(self):
+                self.calls = 0
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    # Sleep slightly to consume time, then return a tool call
+                    time.sleep(0.15)
+                    return LLMResponse(
+                        content="Let me check files.",
+                        tool_calls=[ToolCall(id="tc-1", name="read_file", arguments={"filepath": "test.txt"})],
+                    )
+                return LLMResponse(content="done", usage={"total_tokens": 1})
+
+        fake_tools = [
+            ToolDefinition(name="read_file", description="Read a file", parameters={})
+        ]
+
+        # Set up agent with custom provider and fake tools
+        agent = Subagent(name="test_agent", config=self.config, provider=MultiStepSlowProvider(), tools=fake_tools)
+
+        # Run with timeout_seconds=0.1. Since the first chat call takes 0.15s,
+        # the next step or tool execution check will trigger the timeout.
+        result = agent.execute(task="Do multi-step task", timeout_seconds=0.1)
+        assert result.status == "timed_out"
+        assert result.error == "Subagent task execution exceeded timeout."
+
+    def test_parse_bool_helper(self):
+        """Test the _parse_bool helper function with various formats."""
+        from nyx.tools import _parse_bool
+
+        assert _parse_bool(None, True) is True
+        assert _parse_bool(None, False) is False
+        assert _parse_bool(True) is True
+        assert _parse_bool(False) is False
+        assert _parse_bool(1) is True
+        assert _parse_bool(0) is False
+        assert _parse_bool(1.5) is True
+        assert _parse_bool("true") is True
+        assert _parse_bool("True ") is True
+        assert _parse_bool("1") is True
+        assert _parse_bool("yes") is True
+        assert _parse_bool("on") is True
+        assert _parse_bool("t") is True
+        assert _parse_bool("y") is True
+        assert _parse_bool("false") is False
+        assert _parse_bool("False ") is False
+        assert _parse_bool("0") is False
+        assert _parse_bool("no") is False
+        assert _parse_bool("off") is False
+        assert _parse_bool("f") is False
+        assert _parse_bool("n") is False
+        assert _parse_bool("") is False
+
+        import pytest
+        with pytest.raises(ValueError, match="Invalid boolean value: 'random'"):
+            _parse_bool("random")
+        with pytest.raises(ValueError, match="Invalid type for boolean parsing: list"):
+            _parse_bool([True])
+
+    def test_call_fix_function_does_not_mask_type_errors(self):
+        """_call_fix_function should propagate internal TypeErrors and not mask them."""
+        import pytest
+        from nyx.test_loop import _call_fix_function
+
+        # 1. 2-arg function with internal TypeError
+        def fix_with_internal_error(failures, raw_output):
+            raise TypeError("internal bug")
+
+        with pytest.raises(TypeError, match="internal bug"):
+            _call_fix_function(fix_with_internal_error, [], "", [], None)
+
+        # 2. 4-arg function working normally
+        def fix_4_arg(failures, raw_output, history, timeout):
+            return "fix 4"
+
+        assert _call_fix_function(fix_4_arg, [], "", [], None) == "fix 4"
+
+        # 3. 2-arg function working normally
+        def fix_2_arg(failures, raw_output):
+            return "fix 2"
+
+        assert _call_fix_function(fix_2_arg, [], "", [], None) == "fix 2"
 
 
 # =========================================================================

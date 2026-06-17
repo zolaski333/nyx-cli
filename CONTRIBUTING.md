@@ -6,8 +6,8 @@ Thank you for your interest in contributing to Nyx! We welcome contributions of 
 
 ```bash
 # Clone the repository
-git clone https://github.com/nyx-cli/nyx.git
-cd nyx
+git clone https://github.com/zolaski333/nyx-cli.git
+cd nyx-cli
 
 # Install in development mode with dev dependencies
 pip install -e ".[dev]"
@@ -58,7 +58,7 @@ pytest
 
 ## 🐛 Reporting Issues
 
-- Use the [GitHub issue tracker](https://github.com/nyx-cli/nyx/issues)
+- Use the [GitHub issue tracker](https://github.com/zolaski333/nyx-cli/issues)
 - Include your Python version (`python --version`)
 - Include the output of `nyx --help`
 - Include steps to reproduce the issue

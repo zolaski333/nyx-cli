@@ -107,6 +107,7 @@ class Subagent:
         context: str = "",
         tools: list | None = None,
         max_steps: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> SubagentResult:
         """Run the subagent with a given task.
 
@@ -114,6 +115,10 @@ class Subagent:
             task: The task description for the subagent.
             context: Optional context to prepend.
             tools: Optional tool list override. If None, uses self._tools.
+            max_steps: Maximum reasoning steps.
+            timeout_seconds: Timeout in seconds. Note that when running in-process
+                (process_isolation=False), this is checked only between steps/calls,
+                so a blocking provider call will not be interrupted immediately.
 
         Returns:
             SubagentResult with the output or error.
@@ -155,6 +160,19 @@ class Subagent:
 
         try:
             for step in range(max_steps):
+                if timeout_seconds and (time.monotonic() - started > timeout_seconds):
+                    return SubagentResult(
+                        task=task,
+                        output="",
+                        error="Subagent task execution exceeded timeout.",
+                        status="timed_out",
+                        error_type="timeout",
+                        agent_name=self.name,
+                        steps=step,
+                        tool_calls=observed_tool_calls,
+                        duration_seconds=time.monotonic() - started,
+                    )
+
                 response = provider.chat(
                     messages=messages,
                     tools=effective_tools or None,
@@ -192,6 +210,19 @@ class Subagent:
 
                 # Execute all tool calls in this turn
                 for tc in response.tool_calls:
+                    if timeout_seconds and (time.monotonic() - started > timeout_seconds):
+                        return SubagentResult(
+                            task=task,
+                            output="",
+                            error="Subagent task execution exceeded timeout.",
+                            status="timed_out",
+                            error_type="timeout",
+                            agent_name=self.name,
+                            steps=step + 1,
+                            tool_calls=observed_tool_calls,
+                            duration_seconds=time.monotonic() - started,
+                        )
+
                     observed_tool_calls.append({"name": tc.name, "arguments": dict(tc.arguments)})
                     if allowed_tool_names and tc.name not in allowed_tool_names:
                         return SubagentResult(
@@ -282,7 +313,13 @@ class Subagent:
             self.system_prompt = task.system_prompt
         self.max_tokens = task.max_tokens
         self.temperature = task.temperature
-        return self.execute(task=task.task, context=task.context, tools=tools, max_steps=task.max_steps)
+        return self.execute(
+            task=task.task,
+            context=task.context,
+            tools=tools,
+            max_steps=task.max_steps,
+            timeout_seconds=task.timeout_seconds,
+        )
 
     def _execute_tool_call(self, tc, tools: list) -> str:
         """Execute a single tool call for the subagent.

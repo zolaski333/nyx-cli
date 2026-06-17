@@ -10,10 +10,10 @@ setup(
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     author="Nyx Contributors",
-    url="https://github.com/nyx-cli/nyx",
+    url="https://github.com/zolaski333/nyx-cli",
     project_urls={
-        "Source": "https://github.com/nyx-cli/nyx",
-        "Issues": "https://github.com/nyx-cli/nyx/issues",
+        "Source": "https://github.com/zolaski333/nyx-cli",
+        "Issues": "https://github.com/zolaski333/nyx-cli/issues",
     },
     packages=find_packages(),
     include_package_data=True,

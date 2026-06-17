@@ -52,8 +52,8 @@ Experimental areas:
 
 ```bash
 # Cloner le projet
-git clone https://github.com/nyx-cli/nyx.git
-cd nyx
+git clone https://github.com/zolaski333/nyx-cli.git
+cd nyx-cli
 
 # Configurer ta clé API
 export OPENROUTER_API_KEY="sk-or-..."
@@ -80,8 +80,8 @@ nyx
 
 ```powershell
 # Cloner le projet
-git clone https://github.com/nyx-cli/nyx.git
-cd nyx
+git clone https://github.com/zolaski333/nyx-cli.git
+cd nyx-cli
 
 # Configurer ta clé API
 $env:OPENROUTER_API_KEY = "sk-or-..."
@@ -528,8 +528,8 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 ### Quick start for contributors
 
 ```bash
-git clone https://github.com/nyx-cli/nyx.git
-cd nyx
+git clone https://github.com/zolaski333/nyx-cli.git
+cd nyx-cli
 pip install -e ".[dev]"
 # Make your changes, then:
 ruff check .
