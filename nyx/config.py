@@ -124,6 +124,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mcp_servers": {},
     "skills_dir": "skills",
     "skills_enabled": True,
+    "skills": {
+        "process_isolation": True,
+        "default_timeout_seconds": 30,
+        "max_output_chars": 20000,
+    },
     "subagents_dir": "subagents",
     "subagents": {
         "process_isolation": True,
@@ -227,6 +232,9 @@ class Config:
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     skills_dir: str = ""
     skills_enabled: bool = True
+    skills_process_isolation: bool = True
+    skills_default_timeout_seconds: float | None = 30
+    skills_max_output_chars: int = 20000
     subagents_dir: str = ""
     subagents_process_isolation: bool = True
     subagents_default_timeout_seconds: float | None = 120
@@ -330,6 +338,7 @@ class Config:
         cls._flatten_nested(raw, "rate_limiting", ["enabled", "rate", "burst", "max_retries", "base_delay", "max_delay"])
         cls._flatten_nested(raw, "diff_tool", ["require_approval", "show_full_diff", "enable_rollback", "enable_history", "use_git", "max_rollback_entries"])
         cls._flatten_nested(raw, "agent", ["mode", "autonomy", "max_depth"])
+        cls._flatten_nested(raw, "skills", ["process_isolation", "default_timeout_seconds", "max_output_chars"])
         cls._flatten_nested(raw, "subagents", ["process_isolation", "default_timeout_seconds"])
 
         # Store a copy of raw config (not self-referencing)

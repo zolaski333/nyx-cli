@@ -256,7 +256,12 @@ class Agent:
         self.config = config
         self.provider = provider or get_provider(config)
         self.mcp = mcp_manager or MCPManager()
-        self.skills = skill_manager or SkillManager(config.skills_dir)
+        self.skills = skill_manager or SkillManager(
+            config.skills_dir,
+            process_isolation=config.skills_process_isolation,
+            default_timeout_seconds=config.skills_default_timeout_seconds,
+            max_output_chars=config.skills_max_output_chars,
+        )
         self.subagents = subagent_manager or SubagentManager(
             config,
             process_isolation=config.subagents_process_isolation,

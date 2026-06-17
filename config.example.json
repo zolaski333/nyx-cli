@@ -19,6 +19,11 @@
   },
   "skills_dir": "skills",
   "skills_enabled": true,
+  "skills": {
+    "process_isolation": true,
+    "default_timeout_seconds": 30,
+    "max_output_chars": 20000
+  },
   "subagents_dir": "subagents",
   "subagents": {
     "process_isolation": true,

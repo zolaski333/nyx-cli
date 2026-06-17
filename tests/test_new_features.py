@@ -160,6 +160,134 @@ class TestSkillsConfig:
 
             assert "skill_sample" not in {tool.name for tool in agent.tools}
 
+    def test_skill_discovery_does_not_execute_top_level_code(self):
+        from nyx.skill_manager import SkillManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir) / "skills"
+            marker = Path(tmpdir) / "marker.txt"
+            skills_dir.mkdir()
+            (skills_dir / "sample.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('imported')\n"
+                "name = 'sample'\n"
+                "description = 'sample skill'\n"
+                "parameters = {'type': 'object', 'properties': {}}\n"
+                "def execute(arguments):\n"
+                "    return 'ok'\n",
+                encoding="utf-8",
+            )
+
+            manager = SkillManager(str(skills_dir), process_isolation=False)
+            skills = manager.discover()
+
+            assert [s.name for s in skills] == ["sample"]
+            assert not marker.exists()
+            assert manager.execute_skill("sample", {}) == "ok"
+            assert marker.read_text(encoding="utf-8") == "imported"
+
+    def test_skill_discovery_validates_names_schema_and_duplicates(self):
+        from nyx.skill_manager import SkillManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir) / "skills"
+            skills_dir.mkdir()
+            (skills_dir / "good.py").write_text(
+                "name = 'good'\n"
+                "description = 'good skill'\n"
+                "parameters = {'type': 'object', 'properties': {}}\n"
+                "def execute(arguments):\n"
+                "    return 'ok'\n",
+                encoding="utf-8",
+            )
+            (skills_dir / "duplicate.py").write_text(
+                "name = 'good'\n"
+                "description = 'duplicate skill'\n"
+                "parameters = {'type': 'object', 'properties': {}}\n"
+                "def execute(arguments):\n"
+                "    return 'duplicate'\n",
+                encoding="utf-8",
+            )
+            (skills_dir / "bad_name.py").write_text(
+                "name = '../bad'\n"
+                "description = 'bad skill'\n"
+                "parameters = {'type': 'object', 'properties': {}}\n"
+                "def execute(arguments):\n"
+                "    return 'bad'\n",
+                encoding="utf-8",
+            )
+            (skills_dir / "bad_schema.py").write_text(
+                "name = 'bad_schema'\n"
+                "description = 'bad schema'\n"
+                "parameters = {'type': 'array'}\n"
+                "def execute(arguments):\n"
+                "    return 'bad'\n",
+                encoding="utf-8",
+            )
+
+            manager = SkillManager(str(skills_dir))
+            skills = manager.discover()
+
+            assert [s.name for s in skills] == ["good"]
+            assert [t.name for t in manager.get_tool_definitions()] == ["skill_good"]
+
+    def test_skill_manifest_package_and_output_truncation(self):
+        from nyx.skill_manager import SkillManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir) / "skills"
+            package = skills_dir / "pkg"
+            package.mkdir(parents=True)
+            (package / "skill.json").write_text(
+                json.dumps({
+                    "name": "pkg_skill",
+                    "description": "package skill",
+                    "parameters": {"type": "object", "properties": {}},
+                    "file": "runner.py",
+                    "entrypoint": "run",
+                }),
+                encoding="utf-8",
+            )
+            (package / "runner.py").write_text(
+                "def run(arguments):\n"
+                "    return 'abcdef'\n",
+                encoding="utf-8",
+            )
+
+            manager = SkillManager(str(skills_dir), process_isolation=False, max_output_chars=3)
+            manager.discover()
+            result = manager.execute_skill_result("pkg_skill", {})
+
+            assert result.ok
+            assert result.output == "abc"
+            assert result.truncated is True
+
+    def test_skill_timeout_terminates_worker(self):
+        from nyx.skill_manager import SkillManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir) / "skills"
+            skills_dir.mkdir()
+            (skills_dir / "slow.py").write_text(
+                "name = 'slow'\n"
+                "description = 'slow skill'\n"
+                "parameters = {'type': 'object', 'properties': {}}\n"
+                "def execute(arguments):\n"
+                "    import time\n"
+                "    time.sleep(5)\n"
+                "    return 'too late'\n",
+                encoding="utf-8",
+            )
+
+            manager = SkillManager(str(skills_dir), process_isolation=True, default_timeout_seconds=0.1)
+            manager.discover()
+            started = time.monotonic()
+            result = manager.execute_skill_result("slow", {})
+
+            assert time.monotonic() - started < 2
+            assert result.status == "timed_out"
+            assert result.error_type == "timeout"
+
 
 # =========================================================================
 # Search Code Tests

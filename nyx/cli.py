@@ -1209,8 +1209,17 @@ def main() -> None:
     # Build agent with all subsystems
     provider = get_provider(config)
     mcp = MCPManager()
-    skills = SkillManager(config.skills_dir)
-    subagents = SubagentManager(config)
+    skills = SkillManager(
+        config.skills_dir,
+        process_isolation=config.skills_process_isolation,
+        default_timeout_seconds=config.skills_default_timeout_seconds,
+        max_output_chars=config.skills_max_output_chars,
+    )
+    subagents = SubagentManager(
+        config,
+        process_isolation=config.subagents_process_isolation,
+        default_timeout_seconds=config.subagents_default_timeout_seconds,
+    )
     memory = MemoryManager(provider=provider)
 
     agent = Agent(

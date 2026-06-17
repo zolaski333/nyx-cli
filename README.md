@@ -289,7 +289,7 @@ Nyx supports stdio MCP servers. SSE/streamable HTTP transport is not currently i
 
 ### 🎯 Skill System
 
-Create Python skills in the `skills/` directory — they're auto-discovered and exposed as tools:
+Create Python skills in the `skills/` directory — their metadata is auto-discovered and exposed as tools:
 
 ```python
 # skills/my_skill.py
@@ -307,7 +307,32 @@ def execute(arguments: dict) -> str:
     return f"Processed: {arguments['input']}"
 ```
 
-Skills are trusted local Python code. Loading a skill imports the file, so top-level Python code runs immediately. Only load skills from repositories you trust. Set `"skills_enabled": false` in config to disable skill discovery.
+Skill discovery reads static metadata and does not import the skill module. The Python code runs only when the skill is called. By default, execution happens in a worker process with a hard timeout and bounded output:
+
+```json
+{
+  "skills_enabled": true,
+  "skills": {
+    "process_isolation": true,
+    "default_timeout_seconds": 30,
+    "max_output_chars": 20000
+  }
+}
+```
+
+Packages can also define an explicit `skill.json` manifest:
+
+```json
+{
+  "name": "my_skill",
+  "description": "Does something useful",
+  "parameters": {"type": "object", "properties": {}},
+  "file": "runner.py",
+  "entrypoint": "execute"
+}
+```
+
+Skills are still trusted local Python code: isolated workers use the same OS user and filesystem permissions as Nyx. Only load skills from directories you trust. Set `"skills_enabled": false` in config to disable skill discovery.
 
 ### 👥 Subagents
 
@@ -415,7 +440,7 @@ Priority chain: **Environment variables > config.json > Defaults**
 - Simple shell commands run without a shell where practical. Composite commands and shell-control operators such as `&&`, `|`, redirection and command substitution require approval.
 - MCP servers receive a minimal environment by default; secrets are not inherited automatically.
 - MCP servers are local processes and can perform whatever their implementation allows. Only configure servers you trust.
-- Python skills run as trusted local code. Treat them like scripts from the repository.
+- Python skills are discovered without import and execute in a timeout-bounded worker process by default, but they still run as trusted local code under the same OS user.
 - `--yolo` disables approval prompts and should only be used in disposable or fully trusted projects.
 
 Known limits:
@@ -438,7 +463,8 @@ nyx/
 ├── config.py            # Configuration (env, JSON, defaults)
 ├── agent.py             # Agentic loop + built-in tools
 ├── mcp_client.py        # MCP server connection (JSON-RPC stdio)
-├── skill_manager.py     # Dynamic skill loading
+├── skill_manager.py     # Static skill discovery and execution management
+├── skill_worker.py      # Process-isolated skill execution worker
 ├── subagent.py          # Subagent spawning & management
 ├── subagent_worker.py   # Process-isolated subagent worker
 ├── async_subagent.py    # Parallel subagent execution
