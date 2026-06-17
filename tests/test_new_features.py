@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -502,6 +503,88 @@ FAILED tests/test_memory.py::test_save_and_load - KeyError: 'missing_key'
 
         assert len(history_calls[2]) == 2
         assert history_calls[2][1]["iteration"] == 2
+
+    def test_auto_correct_loop_records_changed_files_and_success(self):
+        """auto_correct_loop should verify real file changes and stop after tests pass."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flag = root / "flag.txt"
+            flag.write_text("bad", encoding="utf-8")
+            command = (
+                f'"{sys.executable}" -c "from pathlib import Path; import sys; '
+                "txt=Path('flag.txt').read_text().strip(); "
+                "print('1 passed') if txt == 'ok' else "
+                "(print('FAILED test_flag.py::test_flag - AssertionError: expected ok'), sys.exit(1))\""
+            )
+
+            def fix(failures, raw_output, history=None):
+                flag.write_text("ok", encoding="utf-8")
+                return "wrote expected flag"
+
+            correction = auto_correct_loop(
+                fix_function=fix,
+                root=root,
+                test_command=command,
+                max_iterations=2,
+                require_changes=True,
+                stop_on_stall=True,
+            )
+
+            assert correction.success
+            assert correction.iterations == 1
+            assert correction.attempts[0].changed_files == ["flag.txt"]
+            assert correction.attempts[0].after_score == 0
+
+    def test_auto_correct_loop_rolls_back_regression(self):
+        """A correction that makes the test score worse should be rolled back."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flag = root / "flag.txt"
+            flag.write_text("one", encoding="utf-8")
+            command = (
+                f'"{sys.executable}" -c "from pathlib import Path; import sys; '
+                "txt=Path('flag.txt').read_text().strip(); "
+                "print('FAILED test_a.py::test_a - AssertionError: first'); "
+                "print('FAILED test_b.py::test_b - AssertionError: second') if txt == 'worse' else None; "
+                "sys.exit(1)\""
+            )
+
+            def fix(failures, raw_output, history=None):
+                flag.write_text("worse", encoding="utf-8")
+                return "made it worse"
+
+            correction = auto_correct_loop(
+                fix_function=fix,
+                root=root,
+                test_command=command,
+                max_iterations=2,
+                require_changes=True,
+                rollback_on_regression=True,
+            )
+
+            assert not correction.success
+            assert correction.rolled_back
+            assert correction.attempts[0].rolled_back
+            assert flag.read_text(encoding="utf-8") == "one"
+
+    def test_auto_correct_loop_detects_no_file_changes_when_required(self):
+        """Reported fixes without source changes should be marked as stalled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            command = f'"{sys.executable}" -c "import sys; print(\'FAILED test_x.py::test_x - AssertionError: nope\'); sys.exit(1)"'
+
+            correction = auto_correct_loop(
+                fix_function=lambda failures, raw_output, history=None: "claimed fix",
+                root=root,
+                test_command=command,
+                max_iterations=2,
+                require_changes=True,
+                stop_on_stall=True,
+            )
+
+            assert not correction.success
+            assert correction.attempts[0].stalled
+            assert "no source files changed" in "\n".join(correction.errors)
 
 
 # =========================================================================

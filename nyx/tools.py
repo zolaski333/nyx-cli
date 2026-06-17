@@ -300,6 +300,11 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
                 "test_command": {"type": "string", "description": "Optional specific test command. If omitted, auto-discovers."},
                 "max_iterations": {"type": "integer", "description": "Maximum fix iterations (default: 5)", "default": 5},
                 "timeout": {"type": "integer", "description": "Timeout per test run in seconds (default: 120)", "default": 120},
+                "fix_timeout": {"type": "integer", "description": "Timeout for each test-fixing subagent attempt (default: 180)", "default": 180},
+                "subagent_max_steps": {"type": "integer", "description": "Maximum subagent reasoning/tool steps per fix attempt (default: 12)", "default": 12},
+                "rollback_on_regression": {"type": "boolean", "description": "Rollback changed files if a fix makes tests worse (default: true)", "default": True},
+                "require_changes": {"type": "boolean", "description": "Treat a fix summary without file changes as stalled (default: true)", "default": True},
+                "stop_on_stall": {"type": "boolean", "description": "Stop when failures do not improve after a fix (default: true)", "default": True},
             },
             "required": [],
         },
@@ -1071,12 +1076,24 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
 
         # -- Auto-correct tests --
         if name == "auto_correct_tests":
+            from nyx.subagent import SubagentTask
+
             test_command = args.get("test_command", "")
             max_iterations = args.get("max_iterations", 5)
             timeout = args.get("timeout", 120)
+            fix_timeout = int(args.get("fix_timeout", 180) or 180)
+            subagent_max_steps = int(args.get("subagent_max_steps", 12) or 12)
+            rollback_on_regression = bool(args.get("rollback_on_regression", True))
+            require_changes = bool(args.get("require_changes", True))
+            stop_on_stall = bool(args.get("stop_on_stall", True))
             root = Path(context.config.project_dir).resolve() if context.config.project_dir else Path(".").resolve()
 
-            def _fix_with_subagent(failures: list[TestFailure], raw_output: str, history: list[dict] = None) -> str:
+            def _fix_with_subagent(
+                failures: list[TestFailure],
+                raw_output: str,
+                history: list[dict] = None,
+                attempt_timeout: int | None = None,
+            ) -> str:
                 if not failures and not raw_output:
                     return ""
                 if not context.subagents:
@@ -1096,15 +1113,26 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 prompt += (
                     "\n\nAnalyze the test failures above and fix the source code. "
                     "Use read_file to understand the code, then apply_diff to fix it. "
-                    "Focus on making the tests pass. Return a summary of what you fixed."
+                    "Focus on making the tests pass. Keep changes minimal. "
+                    "Return a concise summary of the root cause and files changed."
                 )
                 try:
                     agent = context.subagents.spawn("test_fixer", system_prompt=(
                         "You are a test-fixing specialist. Analyze test failures, "
                         "identify root causes in the source code, and fix them. "
                         "Be precise and minimal in your changes."
-                    ))
-                    result = agent.execute(prompt)
+                    ), tools=context.subagent_tools if context.subagent_tools else None)
+                    result = context.subagents.run_task(
+                        SubagentTask(
+                            name=agent.name,
+                            task=prompt,
+                            system_prompt=agent.system_prompt,
+                            max_steps=subagent_max_steps,
+                            timeout_seconds=attempt_timeout or fix_timeout,
+                            max_tokens=agent.max_tokens,
+                            temperature=agent.temperature,
+                        )
+                    )
                     if result.error:
                         return f"Subagent error: {result.error}"
                     return result.output[:500]
@@ -1118,16 +1146,34 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                     test_command=test_command if test_command else None,
                     max_iterations=max_iterations,
                     timeout=timeout,
+                    fix_timeout=fix_timeout,
+                    require_changes=require_changes,
+                    rollback_on_regression=rollback_on_regression,
+                    stop_on_stall=stop_on_stall,
                 )
                 parts = []
                 if correction.success:
                     parts.append(f"✅ All tests passed after {correction.iterations} iteration(s)!")
                 else:
                     parts.append(f"❌ Tests still failing after {correction.iterations} iteration(s).")
+                if correction.rolled_back:
+                    parts.append("Rollback: reverted a regressing correction.")
                 if correction.corrections:
                     parts.append("\nCorrections applied:")
                     for c in correction.corrections:
                         parts.append(f"  • {c}")
+                if correction.attempts:
+                    parts.append("\nAttempts:")
+                    for a in correction.attempts[-5:]:
+                        changed = ", ".join(a.changed_files[:5]) if a.changed_files else "no file changes"
+                        if len(a.changed_files) > 5:
+                            changed += f", ... and {len(a.changed_files) - 5} more"
+                        parts.append(
+                            f"  • #{a.iteration}: score {a.before_score}->{a.after_score}; "
+                            f"{changed}"
+                            + ("; rolled back" if a.rolled_back else "")
+                            + ("; stalled" if a.stalled else "")
+                        )
                 if correction.errors:
                     parts.append("\nIssues:")
                     for e in correction.errors:

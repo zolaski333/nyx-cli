@@ -413,7 +413,7 @@ Conversations are saved to disk with persistent memory and basic summarisation s
 | `repo_map` | Summarise repository structure, Git status and tests |
 | `search_code` | Search code with ripgrep/fallback search |
 | `run_tests` | Discover and run project tests |
-| `auto_correct_tests` | Experimental test-fixing loop using a subagent |
+| `auto_correct_tests` | Structured test-fixing loop with subagent, progress checks and rollback |
 | `find_references` | Find references to a symbol |
 | `finish` | Signal task completion |
 

@@ -21,6 +21,24 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+SNAPSHOT_EXCLUDED_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "env",
+    ".env",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "dist",
+    "build",
+}
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -489,9 +507,131 @@ class CorrectionResult:
     final_result: TestResult | None = None
     corrections: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    attempts: list["CorrectionAttempt"] = field(default_factory=list)
+    rolled_back: bool = False
 
 
-def auto_correct_loop(
+@dataclass
+class CorrectionAttempt:
+    """Structured metadata for one correction attempt."""
+    iteration: int
+    correction: str = ""
+    changed_files: list[str] = field(default_factory=list)
+    before_score: int = 0
+    after_score: int = 0
+    before_signature: str = ""
+    after_signature: str = ""
+    rolled_back: bool = False
+    stalled: bool = False
+
+
+@dataclass
+class _WorkspaceSnapshot:
+    root: Path
+    files: dict[str, bytes | None]
+    truncated: bool = False
+
+    @classmethod
+    def capture(
+        cls,
+        root: Path,
+        *,
+        max_files: int = 2500,
+        max_total_bytes: int = 25_000_000,
+        max_file_bytes: int = 2_000_000,
+    ) -> "_WorkspaceSnapshot":
+        files: dict[str, bytes | None] = {}
+        total_bytes = 0
+        truncated = False
+        for path in _iter_snapshot_files(root):
+            rel = path.relative_to(root).as_posix()
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if len(files) >= max_files or total_bytes + size > max_total_bytes or size > max_file_bytes:
+                truncated = True
+                continue
+            try:
+                files[rel] = path.read_bytes()
+                total_bytes += size
+            except OSError:
+                continue
+        return cls(root=root, files=files, truncated=truncated)
+
+    def changed_files(self, other: "_WorkspaceSnapshot") -> list[str]:
+        names = set(self.files) | set(other.files)
+        return sorted(name for name in names if self.files.get(name) != other.files.get(name))
+
+    def restore(self, changed_files: list[str]) -> list[str]:
+        restored: list[str] = []
+        for rel in changed_files:
+            target = (self.root / rel).resolve()
+            try:
+                target.relative_to(self.root)
+            except ValueError:
+                continue
+            original = self.files.get(rel)
+            try:
+                if original is None:
+                    if target.exists() and target.is_file():
+                        target.unlink()
+                        _remove_empty_parents(target.parent, self.root)
+                        restored.append(rel)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(original)
+                    restored.append(rel)
+            except OSError:
+                logger.warning("Failed to restore %s", target)
+        return restored
+
+
+def _iter_snapshot_files(root: Path):
+    for current, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SNAPSHOT_EXCLUDED_DIRS]
+        current_path = Path(current)
+        if ".nyx" in current_path.parts:
+            # Runtime audit/patch artifacts are not part of source repair quality.
+            continue
+        for filename in files:
+            path = current_path / filename
+            if path.is_file():
+                yield path
+
+
+def _remove_empty_parents(path: Path, root: Path) -> None:
+    while path != root:
+        try:
+            path.rmdir()
+        except OSError:
+            return
+        path = path.parent
+
+
+def _failure_signature(test_result: TestResult) -> str:
+    if test_result.success:
+        return "success"
+    if test_result.failures:
+        parts = [
+            f"{f.file}:{f.line}:{f.test_name}:{f.error_type}:{f.message[:120]}"
+            for f in test_result.failures[:20]
+        ]
+        return "|".join(parts)
+    return (test_result.raw_output or "")[-1000:]
+
+
+def _failure_score(test_result: TestResult) -> int:
+    if test_result.success:
+        return 0
+    if test_result.failed:
+        return test_result.failed * 1000 + max(0, len(test_result.failures))
+    if test_result.failures:
+        return len(test_result.failures) * 1000
+    return 999_999
+
+
+def _auto_correct_loop_legacy(
     fix_function: Callable,
     root: str | Path | None = None,
     test_command: str | None = None,
@@ -576,6 +716,157 @@ def auto_correct_loop(
         )
 
     return result
+
+
+def auto_correct_loop(
+    fix_function: Callable,
+    root: str | Path | None = None,
+    test_command: str | None = None,
+    max_iterations: int = 5,
+    timeout: int = 120,
+    fix_timeout: int | None = None,
+    require_changes: bool = False,
+    rollback_on_regression: bool = True,
+    stop_on_stall: bool = False,
+) -> CorrectionResult:
+    """
+    Run a test -> fix -> re-run loop until all tests pass or max iterations is reached.
+
+    The loop records structured attempts, detects whether files changed, measures
+    before/after failure progress, and can restore changed files when a fix makes
+    the test result worse.
+    """
+    root = Path(root).resolve() if root else Path.cwd().resolve()
+    result = CorrectionResult()
+    history: list[dict] = []
+    seen_signatures: set[str] = set()
+
+    for iteration in range(1, max_iterations + 1):
+        logger.info("Test iteration %d/%d", iteration, max_iterations)
+
+        test_result = run_tests(command=test_command, root=root, timeout=timeout)
+        result.iterations = iteration
+        result.final_result = test_result
+
+        if test_result.success:
+            result.success = True
+            logger.info("All tests passed after %d iterations!", iteration)
+            return result
+
+        before_signature = _failure_signature(test_result)
+        before_score = _failure_score(test_result)
+        before_snapshot = _WorkspaceSnapshot.capture(root)
+
+        if not test_result.failures:
+            result.errors.append(
+                f"Iteration {iteration}: Tests failed but no parseable failures found."
+            )
+
+        fix_desc = _call_fix_function(
+            fix_function,
+            test_result.failures,
+            test_result.raw_output,
+            history,
+            fix_timeout,
+        )
+
+        if not fix_desc:
+            result.errors.append(
+                f"Iteration {iteration}: Fix function returned no changes."
+            )
+            break
+
+        after_snapshot = _WorkspaceSnapshot.capture(root)
+        changed_files = before_snapshot.changed_files(after_snapshot)
+        after_result = run_tests(command=test_command, root=root, timeout=timeout)
+        result.final_result = after_result
+        after_signature = _failure_signature(after_result)
+        after_score = _failure_score(after_result)
+        stalled = after_signature == before_signature and after_score >= before_score
+
+        attempt = CorrectionAttempt(
+            iteration=iteration,
+            correction=fix_desc,
+            changed_files=changed_files,
+            before_score=before_score,
+            after_score=after_score,
+            before_signature=before_signature,
+            after_signature=after_signature,
+            stalled=stalled,
+        )
+
+        if require_changes and not changed_files:
+            result.errors.append(
+                f"Iteration {iteration}: Fix reported changes but no source files changed."
+            )
+            attempt.stalled = True
+            result.attempts.append(attempt)
+            if stop_on_stall:
+                break
+
+        if rollback_on_regression and changed_files and after_score > before_score:
+            restored = before_snapshot.restore(changed_files)
+            attempt.rolled_back = bool(restored)
+            result.rolled_back = result.rolled_back or attempt.rolled_back
+            result.errors.append(
+                f"Iteration {iteration}: Correction regressed tests; rolled back {len(restored)} file(s)."
+            )
+            result.final_result = run_tests(command=test_command, root=root, timeout=timeout)
+            result.attempts.append(attempt)
+            break
+
+        result.corrections.append(
+            f"Iteration {iteration}: {fix_desc}"
+            + (f" ({len(changed_files)} file(s) changed)" if changed_files else "")
+        )
+        result.attempts.append(attempt)
+
+        failure_summaries = [f.summary() for f in after_result.failures]
+        history.append({
+            "iteration": iteration,
+            "correction": fix_desc,
+            "failure_summary": "; ".join(failure_summaries) if failure_summaries else "All tests passed",
+            "changed_files": changed_files,
+            "before_score": before_score,
+            "after_score": after_score,
+        })
+
+        if after_result.success:
+            result.success = True
+            logger.info("All tests passed after %d iterations!", iteration)
+            return result
+
+        repeated = after_signature in seen_signatures
+        seen_signatures.add(before_signature)
+        seen_signatures.add(after_signature)
+        if stop_on_stall and (stalled or repeated):
+            result.errors.append(
+                f"Iteration {iteration}: Correction stalled with the same failure signature."
+            )
+            break
+
+    if not result.success:
+        result.errors.append(
+            f"Max iterations ({max_iterations}) reached or fix stalled."
+        )
+
+    return result
+
+
+def _call_fix_function(
+    fix_function: Callable,
+    failures: list[TestFailure],
+    raw_output: str,
+    history: list[dict],
+    fix_timeout: int | None,
+) -> str:
+    try:
+        return str(fix_function(failures, raw_output, history, fix_timeout))
+    except TypeError:
+        try:
+            return str(fix_function(failures, raw_output, history))
+        except TypeError:
+            return str(fix_function(failures, raw_output))
 
 
 def format_failures_for_llm(failures: list[TestFailure], raw_output: str) -> str:
