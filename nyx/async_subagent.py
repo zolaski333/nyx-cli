@@ -11,7 +11,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, TYPE_CHECKING
 
-from nyx.subagent import Subagent, SubagentResult
+from nyx.subagent import Subagent, SubagentResult, SubagentTask
 from nyx.config import Config
 from nyx.providers.base import ToolCall
 
@@ -28,6 +28,19 @@ class ParallelTask:
     system_prompt: str = ""
     max_tokens: int = 2048
     temperature: float = 0.5
+    max_steps: int = 10
+    timeout_seconds: float | None = None
+
+    def to_subagent_task(self) -> SubagentTask:
+        return SubagentTask(
+            name=self.name,
+            task=self.task,
+            context=self.context,
+            system_prompt=self.system_prompt,
+            max_steps=self.max_steps,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+        )
 
 
 @dataclass
@@ -37,6 +50,7 @@ class ParallelResult:
     completed: int = 0
     failed: int = 0
     total_tokens: int = 0
+    timed_out: int = 0
 
     @property
     def all_successful(self) -> bool:
@@ -70,6 +84,9 @@ class AsyncSubagentManager:
     def set_default_tools(self, tools: list | None) -> None:
         """Set the default tool subset for spawned subagents."""
         self._default_tools = tools
+        with self._lock:
+            for agent in self._agents.values():
+                agent._tools = tools
 
     def set_tool_executor(self, executor: Callable[[ToolCall], str] | None) -> None:
         """Set the shared tool executor used by spawned subagents."""
@@ -82,6 +99,8 @@ class AsyncSubagentManager:
         """Set the tool execution context for all subagents spawned by this manager."""
         with self._lock:
             self._context = context
+            for agent in self._agents.values():
+                agent.context = context
 
     def spawn(
         self,
@@ -94,9 +113,11 @@ class AsyncSubagentManager:
         with self._lock:
             if name in self._agents:
                 return self._agents[name]
+            provider = self._provider_factory() if self._provider_factory else None
             agent = Subagent(
                 name=name,
                 system_prompt=system_prompt,
+                provider=provider,
                 config=self._config,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -109,10 +130,19 @@ class AsyncSubagentManager:
 
     def run(self, name: str, task: str, context: str = "") -> SubagentResult:
         """Run a single subagent (sequential fallback)."""
-        agent = self._agents.get(name) or self.spawn(name)
-        result = agent.execute(task=task, context=context)
+        return self.run_task(SubagentTask(name=name, task=task, context=context))
+
+    def run_task(self, task: SubagentTask) -> SubagentResult:
+        """Run a structured task through one subagent."""
+        agent = self._agents.get(task.name) or self.spawn(
+            task.name,
+            system_prompt=task.system_prompt,
+            max_tokens=task.max_tokens,
+            temperature=task.temperature,
+        )
+        result = agent.execute_task(task, tools=agent._tools)
         with self._lock:
-            self._results.setdefault(name, []).append(result)
+            self._results.setdefault(task.name, []).append(result)
         return result
 
     def run_parallel(self, tasks: list[ParallelTask]) -> ParallelResult:
@@ -133,10 +163,11 @@ class AsyncSubagentManager:
         parallel_result = ParallelResult()
         pool_size = min(self._max_workers, len(tasks))
 
+        ordered_results: list[SubagentResult | None] = [None] * len(tasks)
         with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
             future_to_task = {}
 
-            for pt in tasks:
+            for idx, pt in enumerate(tasks):
                 # Ensure subagent exists
                 agent = self._agents.get(pt.name) or self.spawn(
                     name=pt.name,
@@ -145,25 +176,65 @@ class AsyncSubagentManager:
                     temperature=pt.temperature,
                 )
 
-                future = executor.submit(agent.execute, pt.task, pt.context)
-                future_to_task[future] = pt
+                future = executor.submit(agent.execute_task, pt.to_subagent_task(), agent._tools)
+                future_to_task[future] = (idx, pt)
 
-            for future in concurrent.futures.as_completed(future_to_task):
-                task_info = future_to_task[future]
+            max_timeout = None
+            timeouts = [pt.timeout_seconds for pt in tasks if pt.timeout_seconds is not None]
+            if timeouts:
+                max_timeout = max(timeouts)
+
+            done, pending = concurrent.futures.wait(
+                future_to_task,
+                timeout=max_timeout,
+                return_when=concurrent.futures.ALL_COMPLETED,
+            )
+
+            for future in done:
+                idx, task_info = future_to_task[future]
                 try:
                     result = future.result()
                 except Exception as e:
-                    result = SubagentResult(task=task_info.task, output="", error=str(e))
+                    result = SubagentResult(
+                        task=task_info.task,
+                        output="",
+                        error=str(e),
+                        status="failed",
+                        error_type=type(e).__name__,
+                        agent_name=task_info.name,
+                    )
 
                 with self._lock:
                     self._results.setdefault(task_info.name, []).append(result)
 
-                if result.error:
-                    parallel_result.failed += 1
-                else:
-                    parallel_result.completed += 1
-                parallel_result.total_tokens += result.tokens_used
-                parallel_result.results.append(result)
+                ordered_results[idx] = result
+
+            for future in pending:
+                idx, task_info = future_to_task[future]
+                future.cancel()
+                result = SubagentResult(
+                    task=task_info.task,
+                    output="",
+                    error="Subagent timed out.",
+                    status="timed_out",
+                    error_type="timeout",
+                    agent_name=task_info.name,
+                )
+                with self._lock:
+                    self._results.setdefault(task_info.name, []).append(result)
+                ordered_results[idx] = result
+
+        for result in ordered_results:
+            if result is None:
+                continue
+            if result.status == "timed_out":
+                parallel_result.timed_out += 1
+            if result.error:
+                parallel_result.failed += 1
+            else:
+                parallel_result.completed += 1
+            parallel_result.total_tokens += result.tokens_used
+            parallel_result.results.append(result)
 
         return parallel_result
 

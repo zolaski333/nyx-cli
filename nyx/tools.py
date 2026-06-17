@@ -85,6 +85,8 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
                 "name": {"type": "string", "description": "A unique name for this subagent"},
                 "task": {"type": "string", "description": "The task to delegate (detailed instructions)"},
                 "system_prompt": {"type": "string", "description": "Optional custom system prompt for the subagent"},
+                "context": {"type": "string", "description": "Optional scoped context for this subagent"},
+                "max_steps": {"type": "integer", "description": "Maximum reasoning/tool steps for this subagent", "default": 10},
             },
             "required": ["name", "task"],
         },
@@ -105,6 +107,8 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
                             "task": {"type": "string", "description": "The detailed task description"},
                             "context": {"type": "string", "description": "Optional shared context for this subagent"},
                             "system_prompt": {"type": "string", "description": "Optional custom system prompt"},
+                            "max_steps": {"type": "integer", "description": "Maximum reasoning/tool steps", "default": 10},
+                            "timeout_seconds": {"type": "number", "description": "Optional batch timeout window in seconds"},
                         },
                         "required": ["name", "task"],
                     },
@@ -557,14 +561,20 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             s_name = args.get("name", "unnamed")
             s_task = args.get("task", "")
             s_prompt = args.get("system_prompt", "")
+            s_context = args.get("context", "")
+            max_steps = int(args.get("max_steps", 10) or 10)
             if not context.subagents:
                 return "[subagent_run] Subagent manager not available."
             agent = context.subagents.spawn(s_name, s_prompt)
-            # Pass controlled tool subset
-            result = agent.execute(s_task, tools=context.subagent_tools if context.subagent_tools else None)
+            result = agent.execute(
+                s_task,
+                context=s_context,
+                tools=context.subagent_tools if context.subagent_tools else None,
+                max_steps=max_steps,
+            )
             if result.error:
-                return f"[Subagent:{s_name}] Error: {result.error}"
-            return f"[Subagent:{s_name}] Result:\n{result.output}"
+                return f"[Subagent:{s_name}] {result.status} ({result.error_type}): {result.error}"
+            return f"[Subagent:{s_name}] completed in {result.steps} step(s):\n{result.output}"
 
         if name == "parallel_subagents":
             from nyx.async_subagent import ParallelTask
@@ -579,16 +589,21 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                     task=t["task"],
                     context=t.get("context", ""),
                     system_prompt=t.get("system_prompt", ""),
+                    max_steps=int(t.get("max_steps", 10) or 10),
+                    timeout_seconds=t.get("timeout_seconds"),
                 )
                 for i, t in enumerate(tasks_data)
             ]
             result = context.async_subagents.run_parallel(tasks)
-            parts = [f"✅ Parallel execution: {result.completed} completed, {result.failed} failed"]
+            parts = [
+                f"Parallel execution: {result.completed} completed, "
+                f"{result.failed} failed, {result.timed_out} timed out"
+            ]
             for r in result.results:
-                status = "✓" if not r.error else "✗"
-                parts.append(f"\n[{status}] {r.task[:60]}")
+                label = r.agent_name or r.task[:60]
+                parts.append(f"\n[{r.status}] {label}: {r.task[:60]}")
                 if r.error:
-                    parts.append(f"  Error: {r.error}")
+                    parts.append(f"  Error ({r.error_type}): {r.error}")
                 else:
                     parts.append(f"  Output: {r.output[:500]}")
             return "\n".join(parts)

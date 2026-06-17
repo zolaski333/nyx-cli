@@ -320,6 +320,16 @@ Agent> I'll spawn a subagent for code analysis...
 [Subagent:code-analysis] Analysing...
 ```
 
+Subagents now use a structured task/result contract internally:
+
+- per-task `max_steps` budget;
+- explicit `status`, `error_type`, token count, step count, tool-call trace and duration;
+- validation that model-requested tools are present in the subagent's allowed tool set;
+- propagation of updated tool/context settings to already-spawned subagents;
+- parallel results returned in input order with completed/failed/timed-out counts.
+
+This makes subagents more predictable, but they still run in-process and are not a hard isolation boundary.
+
 ### 🌐 Web Search
 
 Built-in DuckDuckGo search — no API key needed. The agent can search the web and fetch pages.
@@ -404,7 +414,7 @@ Known limits:
 - Shell command parsing is conservative but not a substitute for OS sandboxing.
 - Rollback/history files are best-effort developer aids, not backups.
 - Memory summaries can omit details; keep important project state in files and tests.
-- Subagents and auto-correction loops are useful but still experimental.
+- Subagents have structured results and tool capability checks, but they still run in-process and share the parent security boundary.
 
 ---
 

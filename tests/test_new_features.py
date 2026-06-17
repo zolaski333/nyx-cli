@@ -445,6 +445,19 @@ class TestSubagentControlledTools:
         agent = manager.spawn("test_agent2")  # No tools arg
         assert agent._tools == fake_tools
 
+    def test_subagent_manager_updates_existing_agents_tools_and_context(self):
+        """Manager updates should propagate to already-spawned subagents."""
+        manager = SubagentManager(self.config)
+        agent = manager.spawn("existing")
+        fake_tools = [ToolDefinition(name="read_file", description="Read", parameters={"type": "object", "properties": {}})]
+        marker_context = object()
+
+        manager.set_default_tools(fake_tools)
+        manager.set_context(marker_context)  # type: ignore[arg-type]
+
+        assert agent._tools == fake_tools
+        assert agent.context is marker_context
+
     def test_subagent_execute_tool_call_read_file(self):
         """Subagent._execute_tool_call should handle read_file."""
         import tempfile
@@ -519,8 +532,58 @@ class TestSubagentControlledTools:
         
         result = agent.execute(task="Do task", tools=fake_tools)
         assert result.error is None
+        assert result.status == "completed"
+        assert result.ok
+        assert result.steps == 2
+        assert result.tool_calls == [{"name": "read_file", "arguments": {"path": "dummy.txt"}}]
         assert "Final Answer based on: mock content from dummy.txt" in result.output
         assert result.tokens_used == 15
+
+    def test_subagent_rejects_tool_not_in_allowed_set(self):
+        """Subagents should fail clearly when a model calls a tool outside its capability set."""
+        from nyx.providers.base import BaseLLMProvider, LLMResponse, ToolCall
+
+        class ToolEscalationProvider(BaseLLMProvider):
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                return LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(id="call_x", name="execute_command", arguments={"command": "echo nope"})],
+                    usage={"total_tokens": 3},
+                )
+
+        agent = Subagent(name="restricted", config=self.config, provider=ToolEscalationProvider(self.config))
+        allowed = [ToolDefinition(name="read_file", description="Read", parameters={"type": "object", "properties": {}})]
+
+        result = agent.execute("Try to run command", tools=allowed)
+
+        assert result.status == "failed"
+        assert result.error_type == "tool_not_allowed"
+        assert "execute_command" in (result.error or "")
+        assert result.tool_calls == [{"name": "execute_command", "arguments": {"command": "echo nope"}}]
+
+    def test_parallel_subagents_preserve_task_order_and_metadata(self):
+        """Parallel execution should return results in input order with structured metadata."""
+        from nyx.async_subagent import AsyncSubagentManager, ParallelTask
+        from nyx.providers.base import BaseLLMProvider, LLMResponse
+
+        class EchoProvider(BaseLLMProvider):
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                return LLMResponse(content=f"done: {messages[-1]['content']}", usage={"total_tokens": 2})
+
+        manager = AsyncSubagentManager(config=self.config, provider_factory=lambda: EchoProvider(self.config))
+
+        manager.spawn("slow")
+        manager.spawn("fast")
+
+        result = manager.run_parallel([
+            ParallelTask(name="slow", task="first"),
+            ParallelTask(name="fast", task="second"),
+        ])
+
+        assert result.completed == 2
+        assert result.failed == 0
+        assert [r.agent_name for r in result.results] == ["slow", "fast"]
+        assert [r.output for r in result.results] == ["done: first", "done: second"]
 
 
 # =========================================================================

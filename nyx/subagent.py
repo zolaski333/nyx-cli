@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, TYPE_CHECKING
 
@@ -21,12 +22,49 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class SubagentTask:
+    """Structured task contract for a subagent run."""
+    name: str
+    task: str
+    context: str = ""
+    system_prompt: str = ""
+    max_steps: int = 10
+    max_tokens: int = 2048
+    temperature: float = 0.5
+    expected_output: str = "Concise answer or structured findings."
+
+
+@dataclass
 class SubagentResult:
     """Result from a subagent execution."""
     task: str
     output: str
     tokens_used: int = 0
     error: str | None = None
+    status: str = "completed"
+    error_type: str | None = None
+    agent_name: str = ""
+    steps: int = 0
+    tool_calls: list[dict[str, Any]] | None = None
+    duration_seconds: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None and self.status == "completed"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task": self.task,
+            "output": self.output,
+            "tokens_used": self.tokens_used,
+            "error": self.error,
+            "status": self.status,
+            "error_type": self.error_type,
+            "agent_name": self.agent_name,
+            "steps": self.steps,
+            "tool_calls": self.tool_calls or [],
+            "duration_seconds": self.duration_seconds,
+        }
 
 
 class Subagent:
@@ -62,6 +100,7 @@ class Subagent:
         task: str,
         context: str = "",
         tools: list | None = None,
+        max_steps: int | None = None,
     ) -> SubagentResult:
         """Run the subagent with a given task.
 
@@ -73,6 +112,7 @@ class Subagent:
         Returns:
             SubagentResult with the output or error.
         """
+        started = time.monotonic()
         provider = self._provider
         if not provider and self._config:
             try:
@@ -84,6 +124,10 @@ class Subagent:
                 task=task,
                 output="",
                 error="No LLM provider configured for subagent.",
+                status="failed",
+                error_type="provider_unavailable",
+                agent_name=self.name,
+                duration_seconds=time.monotonic() - started,
             )
 
         messages: list[dict[str, Any]] = [
@@ -97,9 +141,11 @@ class Subagent:
         effective_tools = tools if tools is not None else self._tools
 
         # Maximum depth of tool calls
-        max_steps = 10
+        max_steps = max_steps if max_steps is not None else 10
         total_tokens = 0
         use_anthropic_format = self._config.provider == "anthropic" if self._config else False
+        observed_tool_calls: list[dict[str, Any]] = []
+        allowed_tool_names = {t.name for t in effective_tools or []}
 
         try:
             for step in range(max_steps):
@@ -129,12 +175,31 @@ class Subagent:
                 if not response.tool_calls or not effective_tools:
                     return SubagentResult(
                         task=task,
-                        output=response.content,
+                        output=response.content or "",
                         tokens_used=total_tokens,
+                        status="completed",
+                        agent_name=self.name,
+                        steps=step + 1,
+                        tool_calls=observed_tool_calls,
+                        duration_seconds=time.monotonic() - started,
                     )
 
                 # Execute all tool calls in this turn
                 for tc in response.tool_calls:
+                    observed_tool_calls.append({"name": tc.name, "arguments": dict(tc.arguments)})
+                    if allowed_tool_names and tc.name not in allowed_tool_names:
+                        return SubagentResult(
+                            task=task,
+                            output="",
+                            tokens_used=total_tokens,
+                            error=f"Tool '{tc.name}' is not allowed for subagent '{self.name}'.",
+                            status="failed",
+                            error_type="tool_not_allowed",
+                            agent_name=self.name,
+                            steps=step + 1,
+                            tool_calls=observed_tool_calls,
+                            duration_seconds=time.monotonic() - started,
+                        )
                     if self.context:
                         from nyx.tools import execute_tool
                         tool_result = execute_tool(tc, self.context)
@@ -172,17 +237,46 @@ class Subagent:
                         task=task,
                         output=output_val,
                         tokens_used=total_tokens,
+                        status="completed",
+                        agent_name=self.name,
+                        steps=step + 1,
+                        tool_calls=observed_tool_calls,
+                        duration_seconds=time.monotonic() - started,
                     )
 
             # If we reached max_steps, return the last response content
             return SubagentResult(
                 task=task,
-                output=messages[-1].get("content") or "Max reasoning steps reached.",
+                output=messages[-1].get("content") or "",
+                error="Max reasoning steps reached.",
+                status="failed",
+                error_type="max_steps",
                 tokens_used=total_tokens,
+                agent_name=self.name,
+                steps=max_steps,
+                tool_calls=observed_tool_calls,
+                duration_seconds=time.monotonic() - started,
             )
 
         except Exception as e:
-            return SubagentResult(task=task, output="", error=str(e), tokens_used=total_tokens)
+            return SubagentResult(
+                task=task,
+                output="",
+                error=str(e),
+                status="failed",
+                error_type=type(e).__name__,
+                tokens_used=total_tokens,
+                agent_name=self.name,
+                duration_seconds=time.monotonic() - started,
+            )
+
+    def execute_task(self, task: SubagentTask, tools: list | None = None) -> SubagentResult:
+        """Run a structured task contract."""
+        if task.system_prompt:
+            self.system_prompt = task.system_prompt
+        self.max_tokens = task.max_tokens
+        self.temperature = task.temperature
+        return self.execute(task=task.task, context=task.context, tools=tools, max_steps=task.max_steps)
 
     def _execute_tool_call(self, tc, tools: list) -> str:
         """Execute a single tool call for the subagent.
@@ -245,6 +339,8 @@ class SubagentManager:
     def set_default_tools(self, tools: list | None) -> None:
         """Set the default tool subset for all spawned subagents."""
         self._default_tools = tools
+        for agent in self._subagents.values():
+            agent._tools = tools
 
     def set_tool_executor(self, executor: Callable[[ToolCall], str] | None) -> None:
         """Set the shared tool executor used by spawned subagents."""
@@ -255,6 +351,8 @@ class SubagentManager:
     def set_context(self, context: ToolContext | None) -> None:
         """Set the tool execution context for all subagents spawned by this manager."""
         self._context = context
+        for agent in self._subagents.values():
+            agent.context = context
 
     def spawn(
         self,
@@ -299,13 +397,22 @@ class SubagentManager:
         context: str = "",
     ) -> SubagentResult:
         """Run a subagent (auto-spawn if needed)."""
-        agent = self._subagents.get(name) or self.spawn(name)
+        return self.run_task(SubagentTask(name=name, task=task, context=context))
+
+    def run_task(self, task: SubagentTask) -> SubagentResult:
+        """Run a structured subagent task."""
+        agent = self._subagents.get(task.name) or self.spawn(
+            task.name,
+            system_prompt=task.system_prompt,
+            max_tokens=task.max_tokens,
+            temperature=task.temperature,
+        )
         if self._progress_callback:
-            self._progress_callback(name, 0, 1)
-        result = agent.execute(task=task, context=context)
+            self._progress_callback(task.name, 0, 1)
+        result = agent.execute_task(task, tools=agent._tools)
         if self._progress_callback:
-            self._progress_callback(name, 1, 1)
-        self._results.setdefault(name, []).append(result)
+            self._progress_callback(task.name, 1, 1)
+        self._results.setdefault(task.name, []).append(result)
         return result
 
     def run_parallel(self, tasks: list[tuple[str, str, str]]) -> list[SubagentResult]:
