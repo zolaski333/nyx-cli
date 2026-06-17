@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ from nyx.test_loop import (
     _parse_counts,
     auto_correct_loop,
 )
-from nyx.subagent import Subagent, SubagentManager, SubagentResult
+from nyx.subagent import Subagent, SubagentManager, SubagentResult, SubagentTask
 from nyx.agent import Agent, AgentContext
 from nyx.config import Config
 from nyx.providers.base import ToolDefinition
@@ -584,6 +585,57 @@ class TestSubagentControlledTools:
         assert result.failed == 0
         assert [r.agent_name for r in result.results] == ["slow", "fast"]
         assert [r.output for r in result.results] == ["done: first", "done: second"]
+
+    def test_subagent_manager_uses_process_runner_when_isolated(self, monkeypatch):
+        """Managers should route eligible subagents through the isolated runner."""
+        calls = []
+
+        def fake_runner(*, task, config, tools, timeout_seconds=None):
+            calls.append((task, config, tools, timeout_seconds))
+            return SubagentResult(
+                task=task.task,
+                output="isolated",
+                status="completed",
+                agent_name=task.name,
+            )
+
+        monkeypatch.setattr("nyx.subagent_worker.run_subagent_task_in_process", fake_runner)
+
+        manager = SubagentManager(self.config, process_isolation=True, default_timeout_seconds=7)
+        fake_tools = [ToolDefinition(name="read_file", description="Read", parameters={"type": "object", "properties": {}})]
+        manager.set_default_tools(fake_tools)
+
+        result = manager.run_task(SubagentTask(name="iso", task="work"))
+
+        assert result.output == "isolated"
+        assert len(calls) == 1
+        assert calls[0][0].name == "iso"
+        assert calls[0][2] == fake_tools
+        assert calls[0][3] == 7
+
+    def test_parallel_subagents_timeout_does_not_wait_for_slow_inprocess_task(self):
+        """Parallel timeouts should return promptly even for in-process fallback tasks."""
+        from nyx.async_subagent import AsyncSubagentManager, ParallelTask
+        from nyx.providers.base import BaseLLMProvider, LLMResponse
+
+        class SlowProvider(BaseLLMProvider):
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                time.sleep(1)
+                return LLMResponse(content="too late", usage={"total_tokens": 1})
+
+        manager = AsyncSubagentManager(
+            config=self.config,
+            provider_factory=lambda: SlowProvider(self.config),
+            process_isolation=True,
+        )
+
+        started = time.monotonic()
+        result = manager.run_parallel([ParallelTask(name="slow", task="wait", timeout_seconds=0.05)])
+
+        assert time.monotonic() - started < 0.5
+        assert result.timed_out == 1
+        assert result.failed == 1
+        assert result.results[0].status == "timed_out"
 
 
 # =========================================================================

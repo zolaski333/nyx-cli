@@ -125,6 +125,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "skills_dir": "skills",
     "skills_enabled": True,
     "subagents_dir": "subagents",
+    "subagents": {
+        "process_isolation": True,
+        "default_timeout_seconds": 120,
+    },
     "web_search_enabled": True,
     "web_search_provider": "duckduckgo",
     "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",
@@ -224,6 +228,8 @@ class Config:
     skills_dir: str = ""
     skills_enabled: bool = True
     subagents_dir: str = ""
+    subagents_process_isolation: bool = True
+    subagents_default_timeout_seconds: float | None = 120
     project_dir: str = ""
     web_search_enabled: bool = True
     web_search_provider: str = "duckduckgo"
@@ -324,6 +330,7 @@ class Config:
         cls._flatten_nested(raw, "rate_limiting", ["enabled", "rate", "burst", "max_retries", "base_delay", "max_delay"])
         cls._flatten_nested(raw, "diff_tool", ["require_approval", "show_full_diff", "enable_rollback", "enable_history", "use_git", "max_rollback_entries"])
         cls._flatten_nested(raw, "agent", ["mode", "autonomy", "max_depth"])
+        cls._flatten_nested(raw, "subagents", ["process_isolation", "default_timeout_seconds"])
 
         # Store a copy of raw config (not self-referencing)
         raw_copy = dict(raw)

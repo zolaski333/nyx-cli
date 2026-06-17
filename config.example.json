@@ -20,6 +20,10 @@
   "skills_dir": "skills",
   "skills_enabled": true,
   "subagents_dir": "subagents",
+  "subagents": {
+    "process_isolation": true,
+    "default_timeout_seconds": 120
+  },
   "project_dir": "",
   "web_search_enabled": true,
   "web_search_provider": "duckduckgo",

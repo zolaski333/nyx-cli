@@ -38,6 +38,7 @@ class ParallelTask:
             context=self.context,
             system_prompt=self.system_prompt,
             max_steps=self.max_steps,
+            timeout_seconds=self.timeout_seconds,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
@@ -70,10 +71,14 @@ class AsyncSubagentManager:
         config: Config | None = None,
         max_workers: int = 4,
         provider_factory: Callable | None = None,
+        process_isolation: bool = True,
+        default_timeout_seconds: float | None = None,
     ) -> None:
         self._config = config
         self._max_workers = max_workers
         self._provider_factory = provider_factory
+        self.process_isolation = process_isolation
+        self.default_timeout_seconds = default_timeout_seconds
         self._lock = threading.Lock()
         self._agents: dict[str, Subagent] = {}
         self._results: dict[str, list[SubagentResult]] = {}
@@ -140,7 +145,18 @@ class AsyncSubagentManager:
             max_tokens=task.max_tokens,
             temperature=task.temperature,
         )
-        result = agent.execute_task(task, tools=agent._tools)
+        timeout_seconds = task.timeout_seconds or self.default_timeout_seconds
+        if self.process_isolation and self._config and agent.can_run_isolated:
+            from nyx.subagent_worker import run_subagent_task_in_process
+
+            result = run_subagent_task_in_process(
+                task=task,
+                config=self._config,
+                tools=agent._tools,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            result = agent.execute_task(task, tools=agent._tools)
         with self._lock:
             self._results.setdefault(task.name, []).append(result)
         return result
@@ -164,7 +180,8 @@ class AsyncSubagentManager:
         pool_size = min(self._max_workers, len(tasks))
 
         ordered_results: list[SubagentResult | None] = [None] * len(tasks)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
+        try:
             future_to_task = {}
 
             for idx, pt in enumerate(tasks):
@@ -176,11 +193,15 @@ class AsyncSubagentManager:
                     temperature=pt.temperature,
                 )
 
-                future = executor.submit(agent.execute_task, pt.to_subagent_task(), agent._tools)
+                future = executor.submit(self.run_task, pt.to_subagent_task())
                 future_to_task[future] = (idx, pt)
 
             max_timeout = None
-            timeouts = [pt.timeout_seconds for pt in tasks if pt.timeout_seconds is not None]
+            timeouts = [
+                pt.timeout_seconds or self.default_timeout_seconds
+                for pt in tasks
+                if (pt.timeout_seconds or self.default_timeout_seconds) is not None
+            ]
             if timeouts:
                 max_timeout = max(timeouts)
 
@@ -204,9 +225,6 @@ class AsyncSubagentManager:
                         agent_name=task_info.name,
                     )
 
-                with self._lock:
-                    self._results.setdefault(task_info.name, []).append(result)
-
                 ordered_results[idx] = result
 
             for future in pending:
@@ -220,9 +238,9 @@ class AsyncSubagentManager:
                     error_type="timeout",
                     agent_name=task_info.name,
                 )
-                with self._lock:
-                    self._results.setdefault(task_info.name, []).append(result)
                 ordered_results[idx] = result
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         for result in ordered_results:
             if result is None:

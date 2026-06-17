@@ -257,11 +257,16 @@ class Agent:
         self.provider = provider or get_provider(config)
         self.mcp = mcp_manager or MCPManager()
         self.skills = skill_manager or SkillManager(config.skills_dir)
-        self.subagents = subagent_manager or SubagentManager(config)
+        self.subagents = subagent_manager or SubagentManager(
+            config,
+            process_isolation=config.subagents_process_isolation,
+            default_timeout_seconds=config.subagents_default_timeout_seconds,
+        )
         self.memory = memory_manager or MemoryManager(provider=self.provider)
         self.async_subagents = async_subagent_manager or AsyncSubagentManager(
             config=config,
-            provider_factory=lambda: get_provider(config),
+            process_isolation=config.subagents_process_isolation,
+            default_timeout_seconds=config.subagents_default_timeout_seconds,
         )
         self.on_token = on_token
         self.on_event = on_event

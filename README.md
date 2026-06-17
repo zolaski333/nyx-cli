@@ -33,7 +33,7 @@ Experimental areas:
 
 - Shell execution and external tools require care. Nyx now prompts for structurally risky commands, but you should still use it on trusted repositories first.
 - MCP servers and Python skills execute local code. Only enable servers and skills you trust.
-- Parallel subagents exist, but the orchestration model is still young.
+- Parallel subagents are available and can run in isolated worker processes, but orchestration is still a young feature.
 
 
 ---
@@ -311,7 +311,7 @@ Skills are trusted local Python code. Loading a skill imports the file, so top-l
 
 ### 👥 Subagents
 
-Spawn child agents for complex tasks. Parallel subagent orchestration is experimental:
+Spawn child agents for complex tasks. Parallel subagent orchestration is experimental but now uses a more explicit execution contract:
 
 ```
 You> analyse the codebase and generate a refactoring plan
@@ -326,9 +326,19 @@ Subagents now use a structured task/result contract internally:
 - explicit `status`, `error_type`, token count, step count, tool-call trace and duration;
 - validation that model-requested tools are present in the subagent's allowed tool set;
 - propagation of updated tool/context settings to already-spawned subagents;
+- optional process isolation with hard worker termination on timeout;
 - parallel results returned in input order with completed/failed/timed-out counts.
 
-This makes subagents more predictable, but they still run in-process and are not a hard isolation boundary.
+Process isolation is enabled by default for subagents that can be recreated from config. Custom in-memory providers or custom tool executors fall back to in-process execution so tests and embedded integrations keep working.
+
+```json
+{
+  "subagents": {
+    "process_isolation": true,
+    "default_timeout_seconds": 120
+  }
+}
+```
 
 ### 🌐 Web Search
 
@@ -414,7 +424,7 @@ Known limits:
 - Shell command parsing is conservative but not a substitute for OS sandboxing.
 - Rollback/history files are best-effort developer aids, not backups.
 - Memory summaries can omit details; keep important project state in files and tests.
-- Subagents have structured results and tool capability checks, but they still run in-process and share the parent security boundary.
+- Subagents have structured results, tool capability checks, and default process isolation. Custom in-memory providers or custom tool executors may still run in-process, and isolated workers still use the same filesystem permissions configured for Nyx.
 
 ---
 
@@ -430,6 +440,7 @@ nyx/
 ├── mcp_client.py        # MCP server connection (JSON-RPC stdio)
 ├── skill_manager.py     # Dynamic skill loading
 ├── subagent.py          # Subagent spawning & management
+├── subagent_worker.py   # Process-isolated subagent worker
 ├── async_subagent.py    # Parallel subagent execution
 ├── web_search.py        # DuckDuckGo search + web fetch
 ├── memory.py            # Persistent memory with summarisation

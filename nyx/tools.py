@@ -87,6 +87,7 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
                 "system_prompt": {"type": "string", "description": "Optional custom system prompt for the subagent"},
                 "context": {"type": "string", "description": "Optional scoped context for this subagent"},
                 "max_steps": {"type": "integer", "description": "Maximum reasoning/tool steps for this subagent", "default": 10},
+                "timeout_seconds": {"type": "number", "description": "Optional hard timeout for isolated subagent execution"},
             },
             "required": ["name", "task"],
         },
@@ -558,19 +559,28 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
 
         # -- Subagent tools --
         if name == "subagent_run":
+            from nyx.subagent import SubagentTask
+
             s_name = args.get("name", "unnamed")
             s_task = args.get("task", "")
             s_prompt = args.get("system_prompt", "")
             s_context = args.get("context", "")
             max_steps = int(args.get("max_steps", 10) or 10)
+            timeout_seconds = args.get("timeout_seconds")
             if not context.subagents:
                 return "[subagent_run] Subagent manager not available."
-            agent = context.subagents.spawn(s_name, s_prompt)
-            result = agent.execute(
-                s_task,
-                context=s_context,
-                tools=context.subagent_tools if context.subagent_tools else None,
-                max_steps=max_steps,
+            agent = context.subagents.spawn(s_name, s_prompt, tools=context.subagent_tools if context.subagent_tools else None)
+            result = context.subagents.run_task(
+                SubagentTask(
+                    name=agent.name,
+                    task=s_task,
+                    context=s_context,
+                    system_prompt=s_prompt,
+                    max_steps=max_steps,
+                    timeout_seconds=timeout_seconds,
+                    max_tokens=agent.max_tokens,
+                    temperature=agent.temperature,
+                )
             )
             if result.error:
                 return f"[Subagent:{s_name}] {result.status} ({result.error_type}): {result.error}"

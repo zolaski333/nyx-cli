@@ -29,6 +29,7 @@ class SubagentTask:
     context: str = ""
     system_prompt: str = ""
     max_steps: int = 10
+    timeout_seconds: float | None = None
     max_tokens: int = 2048
     temperature: float = 0.5
     expected_output: str = "Concise answer or structured findings."
@@ -94,6 +95,11 @@ class Subagent:
         self._tools = tools  # Controlled tool subset (None = no tools)
         self._tool_executor = tool_executor
         self.context = context
+
+    @property
+    def can_run_isolated(self) -> bool:
+        """Whether this subagent can be recreated in a worker process."""
+        return self._provider is None and self._tool_executor is None
 
     def execute(
         self,
@@ -323,8 +329,16 @@ class Subagent:
 class SubagentManager:
     """Manages spawning and tracking subagents."""
 
-    def __init__(self, config: Config | None = None) -> None:
+    def __init__(
+        self,
+        config: Config | None = None,
+        *,
+        process_isolation: bool = True,
+        default_timeout_seconds: float | None = None,
+    ) -> None:
         self._config = config
+        self.process_isolation = process_isolation
+        self.default_timeout_seconds = default_timeout_seconds
         self._subagents: dict[str, Subagent] = {}
         self._results: dict[str, list[SubagentResult]] = {}
         self._default_tools: list | None = None  # Controlled tool subset
@@ -409,7 +423,18 @@ class SubagentManager:
         )
         if self._progress_callback:
             self._progress_callback(task.name, 0, 1)
-        result = agent.execute_task(task, tools=agent._tools)
+        timeout_seconds = task.timeout_seconds or self.default_timeout_seconds
+        if self.process_isolation and self._config and agent.can_run_isolated:
+            from nyx.subagent_worker import run_subagent_task_in_process
+
+            result = run_subagent_task_in_process(
+                task=task,
+                config=self._config,
+                tools=agent._tools,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            result = agent.execute_task(task, tools=agent._tools)
         if self._progress_callback:
             self._progress_callback(task.name, 1, 1)
         self._results.setdefault(task.name, []).append(result)
