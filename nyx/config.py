@@ -25,6 +25,7 @@ DEFAULT_USER_CONFIG_PATH = (
     if os.name == "nt"
     else Path.home() / ".config" / "nyx" / "config.json"
 )
+TRUST_REGISTRY_PATH = Path.home() / ".nyx" / "trusted_workspaces.json"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -146,7 +147,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "default_timeout_seconds": 120,
     },
     "web_search_enabled": True,
-    "web_search_provider": "duckduckgo",
+    "web_search_provider": "searxng",
+    "searxng_base_url": "https://searx.be/search",
     "openrouter_base_url": "https://openrouter.ai/api/v1/chat/completions",
     "openai_base_url": "https://api.openai.com/v1/chat/completions",
     "anthropic_base_url": "https://api.anthropic.com/v1/messages",
@@ -259,7 +261,8 @@ class Config:
     subagents_default_timeout_seconds: float | None = 120
     project_dir: str = ""
     web_search_enabled: bool = True
-    web_search_provider: str = "duckduckgo"
+    web_search_provider: str = "searxng"
+    searxng_base_url: str = DEFAULT_CONFIG["searxng_base_url"]
     openrouter_api_key: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
@@ -314,8 +317,17 @@ class Config:
         # 2. Overlay config files from least-specific to most-specific.
         config_paths = cls._config_paths(path)
         loaded_paths: list[Path] = []
+        trusted_local_configs = cls._trusted_local_config_paths(config_paths)
         for cfg_path in config_paths:
             if cfg_path.exists():
+                if cfg_path in trusted_local_configs and not cls._is_workspace_trusted(Path.cwd()):
+                    if not cls._confirm_workspace_trust(Path.cwd(), cfg_path):
+                        logger.warning(
+                            "Skipping untrusted local config: %s. Using safer global/default config.",
+                            cfg_path,
+                        )
+                        continue
+                    cls.trust_workspace(Path.cwd())
                 with cfg_path.open("r", encoding="utf-8") as f:
                     file_config = json.load(f)
                 raw = cls._deep_merge(raw, file_config)
@@ -396,6 +408,75 @@ class Config:
                 ordered.append(resolved)
                 seen.add(resolved)
         return ordered
+
+    @staticmethod
+    def _trusted_local_config_paths(config_paths: list[Path]) -> set[Path]:
+        """Return default workspace-local config paths that need workspace trust."""
+        local_candidates = {
+            (Path.cwd() / ".nyx" / "config.json").expanduser().resolve(),
+            (Path.cwd() / "config.json").expanduser().resolve(),
+        }
+        trusted: set[Path] = set()
+        for path in config_paths:
+            try:
+                resolved = path.expanduser().resolve()
+            except OSError:
+                resolved = path.expanduser()
+            if resolved in local_candidates:
+                trusted.add(path)
+        return trusted
+
+    @staticmethod
+    def _normalise_workspace(path: str | Path) -> str:
+        return str(Path(path).expanduser().resolve())
+
+    @classmethod
+    def _load_trusted_workspaces(cls) -> list[str]:
+        try:
+            data = json.loads(TRUST_REGISTRY_PATH.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+        if isinstance(data, dict):
+            items = data.get("workspaces", [])
+        else:
+            items = data
+        return [str(item) for item in items if isinstance(item, str)]
+
+    @classmethod
+    def _is_workspace_trusted(cls, workspace: str | Path) -> bool:
+        workspace_key = cls._normalise_workspace(workspace)
+        return workspace_key in set(cls._load_trusted_workspaces())
+
+    @classmethod
+    def trust_workspace(cls, workspace: str | Path) -> None:
+        """Persist workspace trust in the user's Nyx registry."""
+        workspace_key = cls._normalise_workspace(workspace)
+        trusted = cls._load_trusted_workspaces()
+        if workspace_key in trusted:
+            return
+        trusted.append(workspace_key)
+        TRUST_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TRUST_REGISTRY_PATH.write_text(
+            json.dumps({"workspaces": sorted(trusted)}, indent=2),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _confirm_workspace_trust(workspace: Path, config_path: Path) -> bool:
+        """Ask before loading workspace-local config, with safe non-interactive default."""
+        if os.environ.get("NYX_TRUST_WORKSPACE", "").strip().lower() in {"1", "true", "yes", "y"}:
+            return True
+        if os.environ.get("NYX_SKIP_WORKSPACE_TRUST", "").strip().lower() in {"1", "true", "yes", "y"}:
+            return False
+        if not os.isatty(0):
+            return False
+        try:
+            answer = input(
+                f"Trust Nyx workspace '{workspace}' and load local config '{config_path}'? [y/N] "
+            ).strip().lower()
+        except OSError:
+            return False
+        return answer in {"y", "yes", "o", "oui"}
 
     @staticmethod
     def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

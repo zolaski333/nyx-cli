@@ -7,6 +7,7 @@ import tempfile
 
 import pytest
 
+from nyx import config as config_module
 from nyx.config import Config, ConfigError
 
 
@@ -87,3 +88,39 @@ class TestConfig:
         """An unknown provider should still load but fail at provider factory."""
         config = Config(provider="unknown_provider", openrouter_api_key="sk-test")
         assert config.provider == "unknown_provider"
+
+    def test_untrusted_workspace_config_is_skipped_non_interactive(self, monkeypatch, tmp_path):
+        """Workspace-local config should not load before the workspace is trusted."""
+        local_nyx = tmp_path / ".nyx"
+        local_nyx.mkdir()
+        (local_nyx / "config.json").write_text(
+            json.dumps({"provider": "openai", "openai_api_key": "local-secret"}),
+            encoding="utf-8",
+        )
+        registry = tmp_path / "home" / ".nyx" / "trusted_workspaces.json"
+        monkeypatch.setattr(config_module, "TRUST_REGISTRY_PATH", registry)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(os, "isatty", lambda fd: False)
+        old_key = os.environ.pop("OPENROUTER_API_KEY", None)
+        try:
+            with pytest.raises(ConfigError, match="API key"):
+                Config.load()
+        finally:
+            if old_key is not None:
+                os.environ["OPENROUTER_API_KEY"] = old_key
+
+    def test_trusted_workspace_config_loads(self, monkeypatch, tmp_path):
+        """A trusted workspace may overlay local config."""
+        (tmp_path / "config.json").write_text(
+            json.dumps({"provider": "openai", "openai_api_key": "trusted-secret"}),
+            encoding="utf-8",
+        )
+        registry = tmp_path / "home" / ".nyx" / "trusted_workspaces.json"
+        monkeypatch.setattr(config_module, "TRUST_REGISTRY_PATH", registry)
+        monkeypatch.chdir(tmp_path)
+        Config.trust_workspace(tmp_path)
+
+        config = Config.load()
+
+        assert config.provider == "openai"
+        assert config.openai_api_key == "trusted-secret"

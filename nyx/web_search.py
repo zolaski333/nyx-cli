@@ -7,6 +7,7 @@ interface for other search providers.
 from __future__ import annotations
 
 import logging
+import json
 import re
 import urllib.parse
 import urllib.request
@@ -14,6 +15,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SEARXNG_URL = "https://searx.be/search"
 
 
 @dataclass
@@ -24,7 +27,55 @@ class SearchResult:
 
 
 # ---------------------------------------------------------------------------
-# DuckDuckGo (free, no API key)
+# SearXNG (JSON API, no HTML scraping)
+# ---------------------------------------------------------------------------
+
+
+def _searxng_search(query: str, max_results: int = 5, base_url: str = DEFAULT_SEARXNG_URL) -> list[SearchResult]:
+    """Search a SearXNG instance and parse structured JSON results."""
+    params = urllib.parse.urlencode({"q": query, "format": "json", "language": "en"})
+    separator = "&" if "?" in base_url else "?"
+    url = f"{base_url}{separator}{params}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Nyx/1.0 (+https://github.com)",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.warning("SearXNG search failed: %s", e)
+        return []
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as e:
+        logger.warning("SearXNG returned invalid JSON: %s", e)
+        return []
+
+    raw_results = data.get("results", []) if isinstance(data, dict) else []
+    results: list[SearchResult] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url_value = str(item.get("url") or "").strip()
+        snippet = str(item.get("content") or item.get("snippet") or "").strip()
+        if title and url_value:
+            results.append(SearchResult(title=title, url=url_value, snippet=snippet))
+        if len(results) >= max_results:
+            break
+
+    logger.debug("SearXNG returned %d results for '%s'", len(results), query)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# DuckDuckGo legacy fallback (free, no API key)
 # ---------------------------------------------------------------------------
 
 
@@ -204,12 +255,20 @@ def fetch_page(url: str, timeout: int = 15, mode: str = "clean") -> str:
 # ---------------------------------------------------------------------------
 
 _SEARCH_PROVIDERS: dict[str, Callable[[str, int], list[SearchResult]]] = {
+    "searxng": _searxng_search,
     "duckduckgo": _ddg_search,
 }
 
 
-def search_web(query: str, provider: str = "duckduckgo", max_results: int = 5) -> list[SearchResult]:
+def search_web(
+    query: str,
+    provider: str = "searxng",
+    max_results: int = 5,
+    searxng_base_url: str = DEFAULT_SEARXNG_URL,
+) -> list[SearchResult]:
     """Search the web using the configured provider."""
+    if provider == "searxng":
+        return _searxng_search(query, max_results, searxng_base_url)
     func = _SEARCH_PROVIDERS.get(provider)
     if not func:
         available = ", ".join(_SEARCH_PROVIDERS)

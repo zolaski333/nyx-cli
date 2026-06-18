@@ -1,11 +1,12 @@
 """
 Async subagent system — parallel execution of multiple subagents.
 
-Uses `concurrent.futures.ThreadPoolExecutor` for CPU/IO-bound parallel
-execution without requiring asyncio (compatible with Python 3.10+ stdlib).
+Uses asyncio tasks for lightweight orchestration while preserving the
+existing synchronous public API.
 """
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import threading
 from dataclasses import dataclass, field
@@ -62,7 +63,7 @@ class AsyncSubagentManager:
     """
     Manages parallel subagent execution.
 
-    Uses a thread pool to run multiple subagents concurrently.
+    Uses asyncio to run multiple subagents concurrently.
     Thread-safe — multiple agents can be spawned simultaneously.
     """
 
@@ -163,9 +164,22 @@ class AsyncSubagentManager:
             self._results.setdefault(task.name, []).append(result)
         return result
 
-    def run_parallel(self, tasks: list[ParallelTask]) -> ParallelResult:
+    async def run_task_async(self, task: SubagentTask) -> SubagentResult:
+        """Run a structured task asynchronously with an optional timeout."""
+        timeout_seconds = task.timeout_seconds or self.default_timeout_seconds
+        loop = asyncio.get_running_loop()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = loop.run_in_executor(executor, self.run_task, task)
+        try:
+            if timeout_seconds is None:
+                return await future
+            return await asyncio.wait_for(future, timeout=timeout_seconds)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    async def run_parallel_async(self, tasks: list[ParallelTask]) -> ParallelResult:
         """
-        Execute multiple subagent tasks in parallel using a thread pool.
+        Execute multiple subagent tasks in parallel using asyncio orchestration.
 
         Example:
             manager = AsyncSubagentManager(config)
@@ -179,70 +193,39 @@ class AsyncSubagentManager:
             return ParallelResult()
 
         parallel_result = ParallelResult()
-        pool_size = min(self._max_workers, len(tasks))
-
         ordered_results: list[SubagentResult | None] = [None] * len(tasks)
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
-        try:
-            future_to_task = {}
+        semaphore = asyncio.Semaphore(max(1, min(self._max_workers, len(tasks))))
 
-            for idx, pt in enumerate(tasks):
-                # Ensure subagent exists
-                self._agents.get(pt.name) or self.spawn(
-                    name=pt.name,
-                    system_prompt=pt.system_prompt,
-                    max_tokens=pt.max_tokens,
-                    temperature=pt.temperature,
-                )
-
-                future = executor.submit(self.run_task, pt.to_subagent_task())
-                future_to_task[future] = (idx, pt)
-
-            max_timeout = None
-            timeouts: list[float] = []
-            for pt in tasks:
-                timeout_seconds = pt.timeout_seconds or self.default_timeout_seconds
-                if timeout_seconds is not None:
-                    timeouts.append(timeout_seconds)
-            if timeouts:
-                max_timeout = max(timeouts)
-
-            done, pending = concurrent.futures.wait(
-                future_to_task,
-                timeout=max_timeout,
-                return_when=concurrent.futures.ALL_COMPLETED,
+        async def run_one(idx: int, pt: ParallelTask) -> None:
+            self._agents.get(pt.name) or self.spawn(
+                name=pt.name,
+                system_prompt=pt.system_prompt,
+                max_tokens=pt.max_tokens,
+                temperature=pt.temperature,
             )
-
-            for future in done:
-                idx, task_info = future_to_task[future]
+            async with semaphore:
                 try:
-                    result = future.result()
+                    ordered_results[idx] = await self.run_task_async(pt.to_subagent_task())
+                except asyncio.TimeoutError:
+                    ordered_results[idx] = SubagentResult(
+                        task=pt.task,
+                        output="",
+                        error="Subagent timed out.",
+                        status="timed_out",
+                        error_type="timeout",
+                        agent_name=pt.name,
+                    )
                 except Exception as e:
-                    result = SubagentResult(
-                        task=task_info.task,
+                    ordered_results[idx] = SubagentResult(
+                        task=pt.task,
                         output="",
                         error=str(e),
                         status="failed",
                         error_type=type(e).__name__,
-                        agent_name=task_info.name,
+                        agent_name=pt.name,
                     )
 
-                ordered_results[idx] = result
-
-            for future in pending:
-                idx, task_info = future_to_task[future]
-                future.cancel()
-                result = SubagentResult(
-                    task=task_info.task,
-                    output="",
-                    error="Subagent timed out.",
-                    status="timed_out",
-                    error_type="timeout",
-                    agent_name=task_info.name,
-                )
-                ordered_results[idx] = result
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        await asyncio.gather(*(run_one(idx, pt) for idx, pt in enumerate(tasks)))
 
         for ordered_result in ordered_results:
             if ordered_result is None:
@@ -257,6 +240,10 @@ class AsyncSubagentManager:
             parallel_result.results.append(ordered_result)
 
         return parallel_result
+
+    def run_parallel(self, tasks: list[ParallelTask]) -> ParallelResult:
+        """Synchronous wrapper around the asyncio subagent orchestrator."""
+        return asyncio.run(self.run_parallel_async(tasks))
 
     def run_batch(
         self,

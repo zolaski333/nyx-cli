@@ -23,6 +23,8 @@ import logging
 import re
 import subprocess
 import time
+import ast
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -1020,6 +1022,11 @@ class PatchTool:
         patch_info = parse_unified_diff(diff, str(path))
         patch_info.original_content = original
         patch_info.proposed_content = content
+        syntax_errors = validate_python_syntax_for_path(path, content)
+        if syntax_errors:
+            return False, "Proposed content failed syntax validation:\n" + "\n".join(
+                f"  - {e}" for e in syntax_errors
+            )
 
         # Detect conflicts
         if original and patch_info.change_type == ChangeType.MODIFY:
@@ -1090,6 +1097,11 @@ class PatchTool:
                 return False, f"Error reading original file: {e}"
 
         proposed = original + content
+        syntax_errors = validate_python_syntax_for_path(path, proposed)
+        if syntax_errors:
+            return False, "Proposed content failed syntax validation:\n" + "\n".join(
+                f"  - {e}" for e in syntax_errors
+            )
         diff = compute_diff(original, proposed, str(path))
 
         if diff == "(no changes)":
@@ -1219,6 +1231,11 @@ class PatchTool:
             proposed = unified_content
 
         patch_info.proposed_content = proposed
+        syntax_errors = validate_python_syntax_for_path(path, proposed)
+        if syntax_errors:
+            return False, "Proposed content failed syntax validation:\n" + "\n".join(
+                f"  - {e}" for e in syntax_errors
+            )
 
         # Git check
         git_status = ""
@@ -1357,9 +1374,12 @@ def _find_best_hunk_match(
     # Clean search_lines normalisation
     search_norm = "\n".join(_normalize_line(l) for l in search_lines).strip()
 
-    # Search bounds
-    start_search = max(0, expected_idx - window)
-    end_search = min(n_orig - n_search + 1, expected_idx + window)
+    anchor_bounds = _anchor_window(original_lines, search_lines, expected_idx)
+    if anchor_bounds:
+        start_search, end_search = anchor_bounds
+    else:
+        start_search = max(0, expected_idx - window)
+        end_search = min(n_orig - n_search + 1, expected_idx + window)
 
     if start_search >= end_search:
         # Fallback to scan entire file if window boundaries are small or invalid
@@ -1521,6 +1541,60 @@ def _normalize_line(line: str) -> str:
     return re.sub(r'\s+', ' ', line.strip())
 
 
+def validate_python_syntax_for_path(path: str | Path, content: str) -> list[str]:
+    """Validate generated Python before it is written to disk."""
+    suffix = Path(path).suffix.lower()
+    if suffix != ".py":
+        return []
+    try:
+        ast.parse(content, filename=str(path))
+    except SyntaxError as e:
+        location = f"{e.lineno}:{e.offset}" if e.lineno else "unknown"
+        return [f"Python syntax error in {path} at {location}: {e.msg}"]
+    return []
+
+
+def _line_fingerprint(line: str) -> str:
+    """Stable line fingerprint used for cheap anchor matching."""
+    return hashlib.blake2b(_normalize_line(line).encode("utf-8"), digest_size=12).hexdigest()
+
+
+def _anchor_window(
+    original_lines: list[str],
+    search_lines: list[str],
+    expected_idx: int,
+    slack: int = 8,
+) -> tuple[int, int] | None:
+    """Use unique-ish matching lines to narrow fuzzy matching to a small window."""
+    if not search_lines or not original_lines:
+        return None
+
+    positions: dict[str, list[int]] = defaultdict(list)
+    for idx, line in enumerate(original_lines):
+        if line.strip():
+            positions[_line_fingerprint(line)].append(idx)
+
+    candidates: list[int] = []
+    for search_offset, line in enumerate(search_lines):
+        if not line.strip():
+            continue
+        matches = positions.get(_line_fingerprint(line), [])
+        if 1 <= len(matches) <= 3:
+            for match_idx in matches:
+                candidates.append(match_idx - search_offset)
+
+    if not candidates:
+        return None
+
+    best_start = min(candidates, key=lambda idx: abs(idx - expected_idx))
+    n_search = len(search_lines)
+    start = max(0, best_start - slack)
+    end = min(len(original_lines) - n_search + 1, best_start + slack + 1)
+    if start >= end:
+        return None
+    return start, end
+
+
 def _find_best_match(original_lines: list[str], search_lines: list[str], threshold: float = 0.6) -> tuple[int, int] | None:
     """Find the best match of search_lines in original_lines using SequenceMatcher.
 
@@ -1538,6 +1612,9 @@ def _find_best_match(original_lines: list[str], search_lines: list[str], thresho
     best_ratio = 0.0
     best_range = None
 
+    anchor_bounds = _anchor_window(original_lines, search_lines, 0)
+    candidate_ranges: list[tuple[int, int]] = []
+
     # Allow window sizes from max(1, n_search - 2) to n_search + 2
     min_w = max(1, n_search - 2)
     max_w = min(n_orig, n_search + 2)
@@ -1545,7 +1622,15 @@ def _find_best_match(original_lines: list[str], search_lines: list[str], thresho
     search_norm = "\n".join(_normalize_line(l) for l in search_lines).strip()
 
     for w in range(min_w, max_w + 1):
-        for i in range(n_orig - w + 1):
+        if anchor_bounds:
+            range_start, range_end = anchor_bounds
+            start_i = max(0, range_start)
+            end_i = min(n_orig - w + 1, range_end)
+        else:
+            start_i = 0
+            end_i = n_orig - w + 1
+        for i in range(start_i, end_i):
+            candidate_ranges.append((i, i + w))
             slice_lines = original_lines[i:i+w]
             slice_norm = "\n".join(_normalize_line(l) for l in slice_lines).strip()
 
@@ -1557,6 +1642,19 @@ def _find_best_match(original_lines: list[str], search_lines: list[str], thresho
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_range = (i, i + w)
+
+    if anchor_bounds and best_ratio < threshold:
+        for w in range(min_w, max_w + 1):
+            for i in range(n_orig - w + 1):
+                if (i, i + w) in candidate_ranges:
+                    continue
+                slice_lines = original_lines[i:i+w]
+                slice_norm = "\n".join(_normalize_line(l) for l in slice_lines).strip()
+                matcher = difflib.SequenceMatcher(None, slice_norm, search_norm)
+                ratio = matcher.ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_range = (i, i + w)
 
     if best_ratio >= threshold and best_range is not None:
         return best_range

@@ -117,7 +117,7 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="parallel_subagents",
-        description="Execute multiple subagent tasks in PARALLEL using a thread pool. Use for independent research, code generation, or analysis tasks. Much faster than sequential execution.",
+        description="Execute multiple subagent tasks in parallel using asyncio orchestration. Use for independent research, code generation, or analysis tasks. Much faster than sequential execution.",
         parameters={
             "type": "object",
             "properties": {
@@ -808,7 +808,12 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             query = args.get("query", "")
             max_results = min(args.get("max_results", 5), 10)
             if context.config.web_search_enabled:
-                results = search_web(query, context.config.web_search_provider, max_results)
+                results = search_web(
+                    query,
+                    context.config.web_search_provider,
+                    max_results,
+                    context.config.searxng_base_url,
+                )
                 return format_search_results(results)
             return "Web search is disabled in config."
 

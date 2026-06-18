@@ -854,3 +854,31 @@ class TestEdgeCases:
         
         match = _find_best_match(original, search)
         assert match == (0, 3)
+
+    def test_anchor_matching_finds_shifted_block(self):
+        """Anchor matching should locate a block far from the stale expected line."""
+        from nyx.diff_tool import _find_best_hunk_match
+
+        original = [f"prefix {i}" for i in range(250)]
+        original += ["def target():", "    value = 1", "    return value"]
+        original += [f"suffix {i}" for i in range(250)]
+
+        match = _find_best_hunk_match(
+            original,
+            ["def target():", "    value = 1", "    return value"],
+            expected_idx=5,
+        )
+
+        assert match == 250
+
+    def test_propose_write_rejects_invalid_python_before_writing(self):
+        """PatchTool should syntax-check generated Python before touching disk."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "bad.py"
+            tool = PatchTool(project_dir=tmpdir)
+
+            success, msg = tool.propose_write(str(filepath), "def broken(:\n    pass\n")
+
+            assert not success
+            assert "syntax" in msg.lower()
+            assert not filepath.exists()
