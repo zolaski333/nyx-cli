@@ -37,6 +37,8 @@ class ReplUI(Protocol):
     def show_switched_conversation(self, title: str) -> None: ...
     def show_multiple_conversation_matches(self, matches: list[Any]) -> None: ...
     def show_conversation_not_found(self, conv_id: str) -> None: ...
+    def show_theme_status(self, theme: str, available_themes: list[str]) -> None: ...
+    def show_theme_changed(self, theme: str) -> None: ...
     def make_on_token(self) -> Callable[[str], None]: ...
     def before_agent_response(self, *, stream: bool) -> None: ...
     def show_agent_result(self, result: str, *, stream: bool) -> None: ...
@@ -112,6 +114,8 @@ def _apply_config_change(agent: "Agent", config: Config, key: str, value: Any) -
         agent.switch_mode(value)
     elif key == "agent.autonomy":
         agent.switch_autonomy(value)
+    elif key == "theme":
+        config.theme = value
 
 
 def _handle_config_command(agent: "Agent", config: Config, ui: ReplUI, user_input: str) -> bool:
@@ -136,6 +140,7 @@ def _handle_config_command(agent: "Agent", config: Config, ui: ReplUI, user_inpu
             data["model"] = config.model
             set_nested(data, "agent.mode", config.agent_mode)
             set_nested(data, "agent.autonomy", config.agent_autonomy)
+            data["theme"] = config.theme
             write_config_file(path, data)
             ui.show_config_saved(path)
         except Exception as e:
@@ -239,6 +244,19 @@ def handle_repl_command(agent: "Agent", config: Config, ui: ReplUI, user_input: 
             ui.show_multiple_conversation_matches(matches)
         else:
             ui.show_conversation_not_found(conv_id)
+        return True
+    if user_input.startswith("/theme"):
+        rest = user_input[6:].strip()
+        available_themes = ["cyberpunk", "dracula", "nord", "sunset", "emerald"]
+        if not rest:
+            ui.show_theme_status(config.theme, available_themes)
+        else:
+            theme_name = rest.lower()
+            if theme_name in available_themes:
+                config.theme = theme_name
+                ui.show_theme_changed(theme_name)
+            else:
+                ui.show_status(f"Unknown theme: {rest}. Available themes: {', '.join(available_themes)}", success=False)
         return True
     return False
 

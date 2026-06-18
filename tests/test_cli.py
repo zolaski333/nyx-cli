@@ -638,6 +638,33 @@ class TestREPLMode:
         # Should exit gracefully on EOF
         assert result.returncode == 0
 
+    def test_repl_theme_command(self):
+        """REPL /theme should list and switch themes."""
+        # 1. Test listing themes
+        result = subprocess.run(
+            [sys.executable, NYX_CLI, "--no-color", "--no-rich"],
+            input="/theme\n/exit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "OPENROUTER_API_KEY": "test-key"},
+        )
+        assert result.returncode == 0
+        assert "Active Theme" in result.stdout
+        assert "cyberpunk" in result.stdout
+
+        # 2. Test switching theme
+        result = subprocess.run(
+            [sys.executable, NYX_CLI, "--no-color", "--no-rich"],
+            input="/theme dracula\n/exit\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "OPENROUTER_API_KEY": "test-key"},
+        )
+        assert result.returncode == 0
+        assert "Theme switched to: dracula" in result.stdout
+
 
 # =========================================================================
 # --json flag tests

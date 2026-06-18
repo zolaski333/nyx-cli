@@ -115,6 +115,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "provider": "openrouter",
     "model": "deepseek/deepseek-v4-flash",
     "system_prompt": "You are a powerful agentic CLI assistant. You have access to tools, skills, MCP servers, subagents, and web search. Be concise, precise, and helpful. Feel free to use Markdown formatting in your responses (bold, lists, code blocks) as the terminal is capable of rendering it.",
+    "theme": "cyberpunk",
     "site_url": "",
     "site_name": "Nyx",
     "request_timeout": 120,
@@ -300,6 +301,7 @@ class Config:
     agent_mode: str = "chat"       # chat | code | architect | debug
     agent_autonomy: str = "ask"    # ask | auto | yolo
     agent_max_depth: int = 50
+    theme: str = "cyberpunk"
     # -- Raw --
     raw: dict[str, Any] = field(default_factory=dict)
 

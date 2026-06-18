@@ -1,4 +1,4 @@
-﻿"""
+"""
  Nyx â€” a standard-library-first agentic coding CLI.
 
 Auto-detects Rich for a beautiful TUI if installed, falls back to basic ANSI.
@@ -629,6 +629,13 @@ class AnsiReplUI:
         print(f"{c('Multiple matches - use full ID:', YELLOW)}")
         for match in matches:
             print(f"  [{c(match.id, CYAN)}] {match.title}")
+
+    def show_theme_status(self, theme: str, available_themes: list[str]) -> None:
+        print(f"\n{c('Active Theme:', BOLD)} {theme}")
+        print(f"{c('Available Themes:', BOLD)} {', '.join(available_themes)}")
+
+    def show_theme_changed(self, theme: str) -> None:
+        print(f"{c('Theme switched to:', GREEN)} {theme}")
 
     def show_conversation_not_found(self, conv_id: str) -> None:
         print(f"{c(f'Conversation not found: {conv_id}', YELLOW)}")

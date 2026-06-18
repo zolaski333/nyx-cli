@@ -49,6 +49,80 @@ def get_console() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Theme system
+# ---------------------------------------------------------------------------
+
+THEMES = {
+    "cyberpunk": {
+        "primary": "magenta",
+        "secondary": "cyan",
+        "accent": "yellow",
+        "success": "green",
+        "error": "red",
+        "info": "blue",
+        "dim": "dim cyan",
+        "border": "magenta",
+        "title": "bold cyan",
+        "syntax_theme": "monokai"
+    },
+    "dracula": {
+        "primary": "#bd93f9",   # Purple
+        "secondary": "#ff79c6", # Pink
+        "accent": "#f1fa8c",    # Yellow
+        "success": "#50fa7b",   # Green
+        "error": "#ff5555",     # Red
+        "info": "#8be9fd",      # Cyan
+        "dim": "dim #6272a4",    # Comment
+        "border": "#bd93f9",
+        "title": "bold #ff79c6",
+        "syntax_theme": "dracula"
+    },
+    "nord": {
+        "primary": "#81a1c1",   # Frost Blue
+        "secondary": "#88c0d0", # Frost Ice
+        "accent": "#ebcb8b",    # Yellow/Gold
+        "success": "#a3be8c",   # Green
+        "error": "#bf616a",     # Red
+        "info": "#8fbcbb",      # Teal
+        "dim": "dim #4c566a",    # Slate Gray
+        "border": "#81a1c1",
+        "title": "bold #88c0d0",
+        "syntax_theme": "nord"
+    },
+    "sunset": {
+        "primary": "#ff5f00",   # Bright Orange
+        "secondary": "#ff005f", # Deep Rose
+        "accent": "#ffd700",    # Gold
+        "success": "#87af00",   # Olive Green
+        "error": "#d70000",     # Dark Red
+        "info": "#00afaf",      # Cyan
+        "dim": "dim #8a8a8a",    # Dark Gray
+        "border": "#ff5f00",
+        "title": "bold #ff005f",
+        "syntax_theme": "autumn"
+    },
+    "emerald": {
+        "primary": "#00af5f",   # Emerald Green
+        "secondary": "#5fafff", # Sky Blue
+        "accent": "#d7af00",    # Amber
+        "success": "#00d700",   # Lime Green
+        "error": "#d75f5f",     # Red-pink
+        "info": "#00afaf",      # Cyan
+        "dim": "dim #808080",    # Mid Gray
+        "border": "#00af5f",
+        "title": "bold #5fafff",
+        "syntax_theme": "emacs"
+    }
+}
+
+
+def get_theme_palette(config: Config) -> dict[str, str]:
+    """Get color palette for active theme."""
+    theme_name = getattr(config, "theme", "cyberpunk").lower()
+    return THEMES.get(theme_name, THEMES["cyberpunk"])
+
+
+# ---------------------------------------------------------------------------
 # Styled components
 # ---------------------------------------------------------------------------
 
@@ -59,30 +133,75 @@ def welcome_panel(config: Config, tool_count: int) -> Any:
         return ""
 
     get_console()
-    grid = Table.grid(padding=(0, 2))
-    grid.add_column()
-    grid.add_column()
+    theme = get_theme_palette(config)
+    p = theme["primary"]
+    s = theme["secondary"]
+    a = theme["accent"]
 
-    grid.add_row("[bold cyan]⚡ Nyx[/bold cyan]", "")
-    grid.add_row("", "")
-    grid.add_row("[dim]Provider:[/dim]", f"[green]{config.provider}[/green]")
-    grid.add_row("[dim]Model:[/dim]", f"[yellow]{config.model}[/yellow]")
-    grid.add_row("[dim]Tools:[/dim]", f"[blue]{tool_count}[/blue]")
+    # Beautiful logo
+    logo = f"""[bold {p}]███╗   ██╗[/bold {p}][bold {s}]██╗   ██╗[/bold {s}][bold {a}]██╗  ██╗[/bold {a}]
+[bold {p}]████╗  ██║[/bold {p}][bold {s}]╚██╗ ██╔╝[/bold {s}][bold {a}]╚██╗██╔╝[/bold {a}]
+[bold {p}]██╔██╗ ██║[/bold {p}][bold {s}] ╚████╔╝ [/bold {s}][bold {a}] ╚███╔╝ [/bold {a}]
+[bold {p}]██║╚██╗██║[/bold {p}][bold {s}]  ╚██╔╝  [/bold {s}][bold {a}] ██╔██╗ [/bold {a}]
+[bold {p}]██║ ╚████║[/bold {p}][bold {s}]   ██║   [/bold {s}][bold {a}]██╔╝ ██╗[/bold {a}]
+[bold {p}]╚═╝  ╚═══╝[/bold {p}][bold {s}]   ╚═╝   [/bold {s}][bold {a}]╚═╝  ╚═╝[/bold {a}]"""
+
+    # Grid layout for metadata
+    meta_table = Table.grid(padding=(0, 4))
+    meta_table.add_column()
+    meta_table.add_column()
+
+    # Left column content
+    left_grid = Table.grid(padding=(0, 1))
+    left_grid.add_column(style=f"bold {p}")
+    left_grid.add_column()
+    left_grid.add_row("Provider  ", f"[white]{config.provider}[/white]")
+    left_grid.add_row("Model     ", f"[white]{config.model}[/white]")
     if config.project_dir:
-        grid.add_row("[dim]Project:[/dim]", f"[white]{config.project_dir}[/white]")
-    grid.add_row("", "")
-    grid.add_row("[dim]Type /help for commands[/dim]", "")
+        # Truncate long project paths nicely
+        proj_path = str(config.project_dir)
+        if len(proj_path) > 40:
+            proj_path = "..." + proj_path[-37:]
+        left_grid.add_row("Project   ", f"[white]{proj_path}[/white]")
 
-    return Panel(grid, box=box.HEAVY, border_style="cyan", title="[bold]🚀 Ready[/bold]")
+    # Right column content
+    right_grid = Table.grid(padding=(0, 1))
+    right_grid.add_column(style=f"bold {s}")
+    right_grid.add_column()
+    right_grid.add_row("Mode      ", f"[white]{config.agent_mode}[/white]")
+    right_grid.add_row("Autonomy  ", f"[white]{config.agent_autonomy}[/white]")
+    right_grid.add_row("Tools     ", f"[white]{tool_count} active[/white]")
+
+    meta_table.add_row(left_grid, right_grid)
+
+    # Combined layout
+    main_layout = Table.grid(padding=(1, 0))
+    main_layout.add_column()
+    main_layout.add_row(logo)
+    main_layout.add_row(meta_table)
+    main_layout.add_row("")
+    main_layout.add_row(f"[dim]Type [/dim][bold {a}]/help[/bold {a}][dim] to view available commands • Theme: [/dim][bold {p}]{getattr(config, 'theme', 'cyberpunk')}[/bold {p}]")
+
+    return Panel(
+        main_layout,
+        box=box.ROUNDED,
+        border_style=theme["border"],
+        title=f"[bold {p}]🚀 System Ready[/bold {p}]",
+        title_align="left"
+    )
 
 
-def help_panel() -> Any:
+def help_panel(config: Config) -> Any:
     """Create a help panel."""
     if not RICH_AVAILABLE:
         return ""
 
-    table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan")
-    table.add_column("Command", style="yellow")
+    theme = get_theme_palette(config)
+    p = theme["primary"]
+    s = theme["secondary"]
+
+    table = Table(box=box.SIMPLE, show_header=True, header_style=f"bold {p}")
+    table.add_column("Command", style=f"bold {s}")
     table.add_column("Description", style="white")
 
     table.add_row("/help", "Show this help")
@@ -90,6 +209,7 @@ def help_panel() -> Any:
     table.add_row("/model <name>", "Change model")
     table.add_row("/mode <name>", "Switch mode: chat | code | architect | debug")
     table.add_row("/autonomy <lvl>", "Switch autonomy: ask | auto | yolo")
+    table.add_row("/theme <theme>", "Switch UI theme: cyberpunk | dracula | nord | sunset | emerald")
     table.add_row("/config", "Show configuration status")
     table.add_row("/config save [--global]", "Save current session config")
     table.add_row("/config set [--global] <key> <val>", "Set config option")
@@ -101,13 +221,17 @@ def help_panel() -> Any:
     table.add_row("/reset", "Reset agent (clear context + shutdown MCP)")
     table.add_row("/exit", "Exit the program")
 
-    return Panel(table, box=box.ROUNDED, border_style="cyan", title="[bold]Commands[/bold]")
+    return Panel(table, box=box.ROUNDED, border_style=theme["border"], title=f"[bold {p}]Commands[/bold {p}]")
 
 
-def tools_table(tools: list[Any], page: int = 1, page_size: int = 10) -> Any:
+def tools_table(config: Config, tools: list[Any], page: int = 1, page_size: int = 10) -> Any:
     """Create a tools table with pagination."""
     if not RICH_AVAILABLE:
         return ""
+
+    theme = get_theme_palette(config)
+    p = theme["primary"]
+    s = theme["secondary"]
 
     total = len(tools)
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -116,17 +240,17 @@ def tools_table(tools: list[Any], page: int = 1, page_size: int = 10) -> Any:
     end = min(start + page_size, total)
 
     table = Table(
-        box=box.SIMPLE, show_header=True, header_style="bold cyan",
+        box=box.SIMPLE, show_header=True, header_style=f"bold {p}",
         title=f"[bold]🔧 Tools ({total}) — Page {page}/{total_pages}[/bold]",
     )
-    table.add_column("Tool", style="green")
+    table.add_column("Tool", style=f"bold {s}")
     table.add_column("Description", style="white", no_wrap=False)
 
     for t in tools[start:end]:
         desc = t.description[:100] + ("..." if len(t.description) > 100 else "")
         table.add_row(t.name, desc)
 
-    return Panel(table, box=box.ROUNDED, border_style="green")
+    return Panel(table, box=box.ROUNDED, border_style=theme["border"])
 
 
 def memory_panel(agent: Agent, page: int = 1, page_size: int = 10) -> Any:
@@ -134,12 +258,17 @@ def memory_panel(agent: Agent, page: int = 1, page_size: int = 10) -> Any:
     if not RICH_AVAILABLE:
         return ""
 
+    theme = get_theme_palette(agent.config)
+    p = theme["primary"]
+    s = theme["secondary"]
+    a = theme["accent"]
+
     conv = agent.memory.current
     if not conv:
-        return Panel("[yellow]No active conversation.[/yellow]", title="[bold]🧠 Memory[/bold]", border_style="cyan")
+        return Panel(f"[{a}]No active conversation.[/{a}]", title=f"[bold {p}]🧠 Memory[/bold {p}]", border_style=theme["border"])
 
-    table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan")
-    table.add_column("Property", style="yellow")
+    table = Table(box=box.SIMPLE, show_header=True, header_style=f"bold {p}")
+    table.add_column("Property", style=f"bold {s}")
     table.add_column("Value", style="white")
     table.add_row("Title", conv.title)
     table.add_row("Messages", str(len(conv.entries)))
@@ -156,11 +285,11 @@ def memory_panel(agent: Agent, page: int = 1, page_size: int = 10) -> Any:
         end = min(start + page_size, total)
 
         entries_table = Table(
-            box=box.SIMPLE, show_header=True, header_style="bold cyan",
+            box=box.SIMPLE, show_header=True, header_style=f"bold {p}",
             title=f"Entries (Page {page}/{total_pages})",
         )
         entries_table.add_column("#", style="dim", width=4)
-        entries_table.add_column("Role", style="green", width=10)
+        entries_table.add_column("Role", style=f"bold {s}", width=10)
         entries_table.add_column("Content", style="white", no_wrap=False)
 
         for i in range(start, end):
@@ -173,11 +302,11 @@ def memory_panel(agent: Agent, page: int = 1, page_size: int = 10) -> Any:
         grid.add_row(entries_table)
         return Panel(
             grid,
-            title="[bold]🧠 Memory[/bold]",
-            border_style="cyan",
+            title=f"[bold {p}]🧠 Memory[/bold {p}]",
+            border_style=theme["border"],
         )
 
-    return Panel(table, title="[bold]🧠 Memory[/bold]", border_style="cyan")
+    return Panel(table, title=f"[bold {p}]🧠 Memory[/bold {p}]", border_style=theme["border"])
 
 
 def conversations_panel(agent: Agent, page: int = 1, page_size: int = 10) -> Any:
@@ -185,9 +314,14 @@ def conversations_panel(agent: Agent, page: int = 1, page_size: int = 10) -> Any
     if not RICH_AVAILABLE:
         return ""
 
+    theme = get_theme_palette(agent.config)
+    p = theme["primary"]
+    s = theme["secondary"]
+    a = theme["accent"]
+
     convs = agent.memory.list_conversations()
     if not convs:
-        return Panel("[yellow]No saved conversations.[/yellow]", title="[bold]📂 Conversations[/bold]", border_style="cyan")
+        return Panel(f"[{a}]No saved conversations.[/{a}]", title=f"[bold {p}]📂 Conversations[/bold {p}]", border_style=theme["border"])
 
     total = len(convs)
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -196,12 +330,12 @@ def conversations_panel(agent: Agent, page: int = 1, page_size: int = 10) -> Any
     end = min(start + page_size, total)
 
     table = Table(
-        box=box.SIMPLE, show_header=True, header_style="bold cyan",
+        box=box.SIMPLE, show_header=True, header_style=f"bold {p}",
         title=f"[bold]📂 Conversations ({total}) — Page {page}/{total_pages}[/bold]",
     )
     table.add_column("ID", style="dim")
     table.add_column("Title", style="white")
-    table.add_column("Messages", style="blue")
+    table.add_column("Messages", style=f"bold {s}")
     table.add_column("Summary", style="dim")
 
     current_id = agent.memory.current.id if agent.memory.current else ""
@@ -215,17 +349,18 @@ def conversations_panel(agent: Agent, page: int = 1, page_size: int = 10) -> Any
             c["summary"][:60] if c["summary"] else "",
         )
 
-    return Panel(table, box=box.ROUNDED, border_style="cyan")
+    return Panel(table, box=box.ROUNDED, border_style=theme["border"])
 
 
-def format_content(content: str) -> Any:
+def format_content(content: str, theme_name: str = "cyberpunk") -> Any:
     """Format agent response as Rich renderable."""
     if not RICH_AVAILABLE:
         return content
 
+    theme = THEMES.get(theme_name, THEMES["cyberpunk"])
     # Try to detect code blocks and render appropriately
     if content.strip().startswith("```"):
-        return Syntax(content, "python", theme="monokai", line_numbers=True)
+        return Syntax(content, "python", theme=theme["syntax_theme"], line_numbers=True)
     return Markdown(content)
 
 
@@ -265,14 +400,16 @@ def make_subagent_progress() -> Progress:
 # ---------------------------------------------------------------------------
 
 
-def _make_rich_on_token() -> Callable[[str], None]:
+def _make_rich_on_token(theme_name: str = "cyberpunk") -> Callable[[str], None]:
     """Create a streaming callback that uses Rich for display."""
     buffer: list[str] = []
     console = get_console()
+    theme = THEMES.get(theme_name, THEMES["cyberpunk"])
+    color = theme["primary"]
 
     def on_token(token: str) -> None:
         buffer.append(token)
-        console.print(token, end="", style="magenta")
+        console.print(token, end="", style=color)
 
     return on_token
 
@@ -280,14 +417,15 @@ def _make_rich_on_token() -> Callable[[str], None]:
 class RichMarkdownStreamer:
     """Render streamed tokens as a live-updating Markdown block."""
 
-    def __init__(self, console: Any) -> None:
+    def __init__(self, console: Any, theme_name: str = "cyberpunk") -> None:
         self.console = console
+        self.theme_name = theme_name
         self.buffer: list[str] = []
         self._live: Any = None
 
     def start(self) -> None:
         self._live = Live(
-            format_content(""),
+            format_content("", self.theme_name),
             console=self.console,
             refresh_per_second=8,
             transient=False,
@@ -297,13 +435,13 @@ class RichMarkdownStreamer:
     def on_token(self, token: str) -> None:
         self.buffer.append(token)
         if self._live:
-            self._live.update(format_content("".join(self.buffer)))
+            self._live.update(format_content("".join(self.buffer), self.theme_name))
 
     def finish(self, final_text: str | None = None) -> None:
         if final_text is not None:
             self.buffer = [final_text]
         if self._live:
-            self._live.update(format_content("".join(self.buffer)))
+            self._live.update(format_content("".join(self.buffer), self.theme_name))
             self._live.stop()
             self._live = None
 
@@ -462,6 +600,8 @@ class RichReplUI:
         self._streamer: RichMarkdownStreamer | None = None
 
     def setup(self, agent: Agent, config: Config) -> None:
+        self.agent = agent
+        self.config = config
         from nyx.cli import setup_readline
         setup_readline(agent)
         agent.on_command_approval = _make_rich_approval_handler(self.console)
@@ -470,16 +610,24 @@ class RichReplUI:
         self.console.print(welcome_panel(config, len(agent.tools)))
 
     def read_input(self) -> str:
-        return str(self.console.input("\n[bold green]You[/bold green]> "))
+        theme = get_theme_palette(self.config)
+        p = theme["primary"]
+        s = theme["secondary"]
+        mode = self.config.agent_mode
+        autonomy = self.config.agent_autonomy
+        prompt_str = f"\n[bold {p}]nyx[/bold {p}] [dim]({mode} • {autonomy})[/dim] [bold {s}]❯[/bold {s} "
+        return str(self.console.input(prompt_str))
 
     def append_history(self, text: str) -> None:
         self.history.append(text)
 
     def show_bye(self) -> None:
-        self.console.print("[bold green]Bye![/bold green]")
+        theme = get_theme_palette(self.config)
+        p = theme["primary"]
+        self.console.print(f"[bold {p}]Bye![/bold {p}]")
 
     def show_help(self) -> None:
-        self.console.print(help_panel())
+        self.console.print(help_panel(self.config))
 
     def show_context_cleared(self) -> None:
         self.console.print("[yellow]Context cleared.[/yellow]")
@@ -536,7 +684,7 @@ class RichReplUI:
         self.console.print(f"[red]{message}[/red]")
 
     def show_tools(self, agent: Agent, page: int) -> None:
-        self.console.print(tools_table(agent.tools, page=page))
+        self.console.print(tools_table(self.config, agent.tools, page=page))
 
     def show_memory(self, agent: Agent, page: int) -> None:
         self.console.print(memory_panel(agent, page=page))
@@ -552,23 +700,58 @@ class RichReplUI:
         for match in matches:
             self.console.print(f"  [cyan]{match.id}[/cyan] {match.title}")
 
+    def show_theme_status(self, theme_name: str, available_themes: list[str]) -> None:
+        theme = get_theme_palette(self.config)
+        p = theme["primary"]
+        s = theme["secondary"]
+
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column()
+        grid.add_column()
+
+        grid.add_row(f"[bold {p}]Active Theme:[/bold {p}]", f"[white]{theme_name}[/white]")
+        grid.add_row("", "")
+        grid.add_row(f"[bold {s}]Available Themes:[/bold {s}]", "")
+        for t in available_themes:
+            marker = "  ← active" if t == theme_name else ""
+            t_palette = THEMES[t]
+            t_primary = t_palette["primary"]
+            grid.add_row("", f"[bold {t_primary}]{t}[/bold {t_primary}]{marker}")
+
+        self.console.print(Panel(
+            grid,
+            box=box.ROUNDED,
+            border_style=theme["border"],
+            title=f"[bold {p}]🎨 Themes[/bold {p}]"
+        ))
+
+    def show_theme_changed(self, theme_name: str) -> None:
+        theme = get_theme_palette(self.config)
+        p = theme["primary"]
+        self.console.print(f"[bold {p}]🎨 Theme switched to:[/bold {p}] [bold white]{theme_name}[/bold white]")
+
     def show_conversation_not_found(self, conv_id: str) -> None:
         self.console.print(f"[yellow]Conversation not found: {conv_id}[/yellow]")
 
     def make_on_token(self) -> Callable[[str], None]:
         if self._streamer is not None:
             return self._streamer.on_token
-        return _make_rich_on_token()
+        return _make_rich_on_token(self.config.theme)
 
     def before_agent_response(self, *, stream: bool) -> None:
         if stream:
-            self.console.print("[bold magenta]Agent[/bold magenta]>")
-            self._streamer = RichMarkdownStreamer(self.console)
+            theme = get_theme_palette(self.config)
+            p = theme["primary"]
+            self.console.print(f"[bold {p}]Agent[/bold {p}]❯")
+            self._streamer = RichMarkdownStreamer(self.console, self.config.theme)
             self._streamer.start()
 
     def show_agent_result(self, result: str, *, stream: bool) -> None:
         if not stream:
-            self.console.print(format_content(result))
+            theme = get_theme_palette(self.config)
+            p = theme["primary"]
+            self.console.print(f"[bold {p}]Agent[/bold {p}]❯")
+            self.console.print(format_content(result, self.config.theme))
         elif self._streamer is not None:
             self._streamer.finish(result)
             self._streamer = None
@@ -598,17 +781,23 @@ def run_rich_single(agent: Agent, prompt: str) -> None:
     agent.on_command_approval = _make_rich_approval_handler(console)
     agent.on_file_approval = _make_rich_file_approval_handler(console)
     streamer: RichMarkdownStreamer | None = None
+    theme_name = getattr(agent.config, "theme", "cyberpunk")
 
     if agent.config.stream:
-        console.print("[bold magenta]Agent[/bold magenta]>")
-        streamer = RichMarkdownStreamer(console)
+        theme = get_theme_palette(agent.config)
+        p = theme["primary"]
+        console.print(f"[bold {p}]Agent[/bold {p}]❯")
+        streamer = RichMarkdownStreamer(console, theme_name)
         streamer.start()
 
     try:
-        result = agent.run(prompt, on_token=streamer.on_token if streamer else _make_rich_on_token())
+        result = agent.run(prompt, on_token=streamer.on_token if streamer else _make_rich_on_token(theme_name))
 
         if not agent.config.stream:
-            console.print(format_content(result))
+            theme = get_theme_palette(agent.config)
+            p = theme["primary"]
+            console.print(f"[bold {p}]Agent[/bold {p}]❯")
+            console.print(format_content(result, theme_name))
         elif streamer:
             streamer.finish(result)
     except Exception:
