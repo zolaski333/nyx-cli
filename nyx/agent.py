@@ -725,6 +725,7 @@ class Agent:
         details: list[str] = []
         is_error = "error" in result.lower() or "[error]" in result.lower() or "denied" in result.lower()
         if not is_error:
+            import re
             if name == "read_file":
                 details.append(f"{len(result.splitlines())} lines read")
             elif name in ("write_file", "append_file"):
@@ -733,6 +734,71 @@ class Agent:
                 details.append(f"{len(str(arguments.get('diff', '')).splitlines())} lines diff")
             elif name == "execute_command" and result.strip() and result != "(no output)":
                 details.append(f"{len(result.splitlines())} lines output")
+            elif name == "subagent_run":
+                m = re.search(r"completed in (\d+) step", result)
+                if m:
+                    details.append(f"{m.group(1)} steps")
+                elif "completed" in result.lower():
+                    details.append("completed")
+                else:
+                    details.append("failed")
+            elif name == "parallel_subagents":
+                m = re.search(r"Parallel execution: (\d+) completed", result)
+                if m:
+                    details.append(f"{m.group(1)} subagents completed")
+                else:
+                    details.append("execution finished")
+            elif name == "web_search":
+                if "No results found." in result:
+                    details.append("0 results found")
+                else:
+                    count = len(re.findall(r"^\[\d+\]", result, re.M))
+                    details.append(f"{count} results found")
+            elif name == "web_fetch":
+                details.append(f"{len(result)} chars fetched")
+            elif name == "search_code":
+                m = re.search(r"Found (\d+) matches", result)
+                if m:
+                    details.append(f"{m.group(1)} matches")
+                else:
+                    details.append("0 matches")
+            elif name == "repo_map":
+                details.append(f"{len(result.splitlines())} lines repo map")
+            elif name == "run_tests":
+                if "All" in result and "passed" in result:
+                    details.append("tests passed")
+                elif "failed" in result:
+                    details.append("tests failed")
+                else:
+                    details.append("finished")
+            elif name == "auto_correct_tests":
+                m = re.search(r"after (\d+) iteration", result)
+                iters = f" ({m.group(1)} iterations)" if m else ""
+                if "passed" in result:
+                    details.append(f"tests passed{iters}")
+                else:
+                    details.append(f"tests failed{iters}")
+            elif name == "list_files":
+                details.append(f"{len(result.splitlines())} files listed")
+            elif name == "find_references":
+                if "No references found" in result:
+                    details.append("0 references")
+                else:
+                    m = re.search(r"\.\.\. and (\d+) more references\.", result)
+                    lines_count = len(result.splitlines())
+                    if m:
+                        total = 100 + int(m.group(1))
+                        details.append(f"{total} references")
+                    else:
+                        details.append(f"{lines_count} references")
+            elif name == "memory_recall":
+                if "No relevant memories found" in result:
+                    details.append("0 memories recalled")
+                else:
+                    count = len(re.findall(r"\[score:", result))
+                    details.append(f"{count} memories recalled")
+            elif name == "memory_save":
+                details.append("saved")
 
         duration = f"{duration_ms / 1000:.2f}s" if duration_ms >= 1000 else f"{int(duration_ms)}ms"
         details.append(f"took {duration}")
@@ -810,11 +876,6 @@ class Agent:
                 target = self._tool_target(tc.name, tc.arguments)
                 self._emit("tool_start", name=tc.name, target=target, arguments=tc.arguments)
 
-                # Log tool call attempt
-                self.json_logger.log_tool_call(
-                    tool_name=tc.name,
-                    arguments=tc.arguments,
-                )
                 result = self._execute_tool(tc)
                 duration = (time.time() - t_start) * 1000
                 is_err = "error" in result.lower() or "[error]" in result.lower() or "denied" in result.lower()
@@ -824,21 +885,6 @@ class Agent:
                     target=target,
                     ok=not is_err,
                     details=self._tool_result_details(tc.name, tc.arguments, result, duration),
-                    duration_ms=duration,
-                )
-
-                # Log tool result
-                self.json_logger.log_tool_result(
-                    tool_name=tc.name,
-                    result=result,
-                    duration_ms=duration,
-                )
-
-                # Audit the tool call
-                self.audit.log_tool_call(
-                    tool_name=tc.name,
-                    arguments=tc.arguments,
-                    result=result,
                     duration_ms=duration,
                 )
 
@@ -880,7 +926,35 @@ class Agent:
             )
         # Sync current subagent tools list in context
         self.tool_context.subagent_tools = self._subagent_tools
-        return execute_tool(tc, self.tool_context)
+
+        t_start = time.time()
+        # Log tool call attempt
+        self.json_logger.log_tool_call(
+            tool_name=tc.name,
+            arguments=tc.arguments,
+        )
+
+        from nyx.tools import execute_tool
+        result = execute_tool(tc, self.tool_context)
+
+        duration = (time.time() - t_start) * 1000
+
+        # Log tool result
+        self.json_logger.log_tool_result(
+            tool_name=tc.name,
+            result=result,
+            duration_ms=duration,
+        )
+
+        # Audit the tool call
+        self.audit.log_tool_call(
+            tool_name=tc.name,
+            arguments=tc.arguments,
+            result=result,
+            duration_ms=duration,
+        )
+
+        return result
 
     def load_conversation_history(self) -> None:
         """Load conversation entries from the current memory session into the agent context."""

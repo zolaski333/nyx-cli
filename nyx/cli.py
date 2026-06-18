@@ -936,33 +936,46 @@ def _setup_logging(verbose: bool = False) -> None:
     )
 
 
-def _make_cli_event_handler(use_rich: bool = False) -> Callable[[dict[str, Any]], None]:
+def _make_cli_event_handler(agent: Agent, use_rich: bool = False) -> Callable[[dict[str, Any]], None]:
     """Render agent events without coupling Agent to terminal output."""
     if use_rich and RICH_AVAILABLE:
-        from nyx.cli_rich import get_console
+        from nyx.cli_rich import get_console, get_theme_palette
 
         console = get_console()
+        theme = get_theme_palette(agent.config)
+        p = theme.get("primary", "cyan")
+        s = theme.get("secondary", "magenta")
+        a = theme.get("accent", "yellow")
+        info = theme.get("info", "blue")
+        success = theme.get("success", "green")
+        error = theme.get("error", "red")
+        dim = theme.get("dim", "dim")
 
         def rich_handler(event: dict[str, Any]) -> None:
             event_type = event.get("type", "")
             if event_type == "status":
-                console.print(f"[dim]{event.get('message', '')}[/dim]")
+                console.print(f"[{dim}]{event.get('message', '')}[/{dim}]")
             elif event_type == "mode":
                 console.print(
-                    f"[dim]Mode:[/dim] [cyan]{event.get('mode')}[/cyan]  "
-                    f"[dim]Autonomy:[/dim] [yellow]{event.get('autonomy')}[/yellow]"
+                    f"[{dim}]Mode:[/{dim}] [{info}]{event.get('mode')}[/{info}]  "
+                    f"[{dim}]Autonomy:[/{dim}] [{a}]{event.get('autonomy')}[/{a}]"
                 )
             elif event_type == "setup_complete":
-                console.print(f"[dim]Tools loaded:[/dim] [green]{event.get('tool_count', 0)}[/green]")
+                console.print(f"[{dim}]Tools loaded:[/{dim}] [{success}]{event.get('tool_count', 0)}[/{success}]")
             elif event_type == "tool_start":
                 target = event.get("target", "")
-                suffix = f" [dim]->[/dim] [cyan]{target}[/cyan]" if target else ""
-                console.print(f"[dim]Tool[/dim] [yellow]{event.get('name')}[/yellow]{suffix}")
+                suffix = f" [{dim}]->[/{dim}] [{info}]{target}[/]" if target else ""
+                console.print(f"🛠️  [{dim}]Tool[/{dim}] [{a}]{event.get('name')}[/]{suffix}")
             elif event_type == "tool_finish":
-                style = "green" if event.get("ok") else "red"
+                style = success if event.get("ok") else error
                 status = "ok" if event.get("ok") else "failed"
+                icon = "✓" if event.get("ok") else "✗"
                 details = ", ".join(event.get("details", []))
-                console.print(f"[{style}]Tool {status}[/] [yellow]{event.get('name')}[/yellow] [dim]({details})[/dim]")
+                console.print(
+                    f"[{style}]{icon}  Tool {status}[/{style}] "
+                    f"[{a}]{event.get('name')}[/{a}] "
+                    f"[{dim}]({details})[/{dim}]"
+                )
 
         return rich_handler
 
@@ -977,12 +990,13 @@ def _make_cli_event_handler(use_rich: bool = False) -> Callable[[dict[str, Any]]
         elif event_type == "tool_start":
             target = event.get("target", "")
             suffix = f" -> {c(str(target), CYAN)}" if target else ""
-            print(f"{c('Tool', DIM)} {c(str(event.get('name')), YELLOW)}{suffix}", flush=True)
+            print(f"🛠️  {c('Tool', DIM)} {c(str(event.get('name')), YELLOW)}{suffix}", flush=True)
         elif event_type == "tool_finish":
             status = "ok" if event.get("ok") else "failed"
+            icon = "✓" if event.get("ok") else "✗"
             status_color = GREEN if event.get("ok") else RED
             details = ", ".join(event.get("details", []))
-            print(f"{c('Tool ' + status, status_color)} {event.get('name')} ({details})", flush=True)
+            print(f"{c(icon + '  Tool ' + status, status_color)} {event.get('name')} {c('(' + details + ')', DIM)}", flush=True)
 
     return ansi_handler
 
@@ -1154,7 +1168,7 @@ def main() -> None:
 
     use_rich = RICH_AVAILABLE and not args.no_rich and not args.json
     if not args.json:
-        agent.on_event = _make_cli_event_handler(use_rich=use_rich)
+        agent.on_event = _make_cli_event_handler(agent, use_rich=use_rich)
 
     # Setup connections
     agent.setup()

@@ -240,7 +240,9 @@ class Subagent:
                             tool_calls=observed_tool_calls,
                             duration_seconds=time.monotonic() - started,
                         )
-                    if self.context:
+                    if self._tool_executor:
+                        tool_result = self._execute_tool_call(tc, effective_tools)
+                    elif self.context:
                         from nyx.tools import execute_tool
                         tool_result = execute_tool(tc, self.context)
                     else:

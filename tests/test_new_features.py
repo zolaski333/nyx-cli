@@ -1736,3 +1736,153 @@ class TestMCPDiscovery:
             assert "git" in updated["mcp_servers"]
             assert updated["mcp_servers"]["git"]["command"] == "npx"
             assert "@modelcontextprotocol/server-git" in updated["mcp_servers"]["git"]["args"]
+
+
+class TestEnrichedToolDetails:
+    """Test the enriched tool details formatting in Agent."""
+
+    def test_enriched_details(self):
+        from nyx.agent import Agent
+
+        # We can call the static method directly
+        details = Agent._tool_result_details("subagent_run", {}, "[Subagent:alice] completed in 5 step(s):\nDone", 1500.0)
+        assert "5 steps" in details
+        assert "took 1.50s" in details
+
+        details = Agent._tool_result_details("parallel_subagents", {}, "Parallel execution: 3 completed, 0 failed, 0 timed out", 500.0)
+        assert "3 subagents completed" in details
+        assert "took 500ms" in details
+
+        details = Agent._tool_result_details("web_search", {}, "[1] Google\n    URL: https://google.com\n    snippet\n\n[2] Bing\n    URL: https://bing.com\n    snippet", 100.0)
+        assert "2 results found" in details
+
+        details = Agent._tool_result_details("web_fetch", {}, "<html>Hello World</html>", 200.0)
+        assert "24 chars fetched" in details
+
+        details = Agent._tool_result_details("search_code", {}, "🔍 Search results for: foo\n   Found 12 matches in 3 files (engine: rg)\n", 300.0)
+        assert "12 matches" in details
+
+        details = Agent._tool_result_details("repo_map", {}, "file1.py\nfile2.py\nfile3.py", 400.0)
+        assert "3 lines repo map" in details
+
+        details = Agent._tool_result_details("run_tests", {}, "✅ All 373 tests passed (1234ms)", 500.0)
+        assert "tests passed" in details
+
+        details = Agent._tool_result_details("run_tests", {}, "❌ 3/373 tests failed (370 passed, 1234ms)", 500.0)
+        assert "tests failed" in details
+
+        details = Agent._tool_result_details("auto_correct_tests", {}, "✅ All tests passed after 3 iteration(s)!", 500.0)
+        assert "tests passed (3 iterations)" in details
+
+        details = Agent._tool_result_details("list_files", {}, "file1.py\nfile2.py", 100.0)
+        assert "2 files listed" in details
+
+        details = Agent._tool_result_details("find_references", {}, "No references found for symbol 'foo'.", 100.0)
+        assert "0 references" in details
+
+        details = Agent._tool_result_details("find_references", {}, "file1.py:12: foo\nfile2.py:15: foo\n... and 23 more references.", 100.0)
+        assert "123 references" in details
+
+        details = Agent._tool_result_details("memory_recall", {}, "No relevant memories found for: query", 100.0)
+        assert "0 memories recalled" in details
+
+        details = Agent._tool_result_details("memory_recall", {}, "Relevant memories:\n[score: 0.9] Memory 1\n[score: 0.8] Memory 2", 100.0)
+        assert "2 memories recalled" in details
+
+        details = Agent._tool_result_details("memory_save", {}, "Note saved to memory", 100.0)
+        assert "saved" in details
+
+
+class TestSubagentToolLogging:
+    """Test that subagent tool calls are captured by the main agent's logger/audit trail."""
+
+    def test_subagent_tool_logging(self, tmp_path):
+        from nyx.agent import Agent, ToolCall
+        from nyx.config import Config
+        import json
+
+        config = Config(provider="openai", openai_api_key="sk-test", project_dir=str(tmp_path))
+        agent = Agent(config=config)
+        agent.setup()
+
+        # Set up a tool call log recorder
+        calls_logged = []
+        results_logged = []
+        audits_logged = []
+
+        agent.json_logger.log_tool_call = lambda tool_name, arguments: calls_logged.append((tool_name, arguments))
+        agent.json_logger.log_tool_result = lambda tool_name, result, duration_ms: results_logged.append((tool_name, result))
+        agent.audit.log_tool_call = lambda tool_name, arguments, result, duration_ms: audits_logged.append((tool_name, arguments, result))
+
+        subagent = agent.subagents.spawn("test_sub", "system prompt")
+        # Subagent has agent._execute_tool set as self._tool_executor
+        assert subagent._tool_executor == agent._execute_tool
+
+        tc = ToolCall(id="tc-sub", name="read_file", arguments={"path": "dummy.py"})
+        
+        # Mock actual execution of the tool
+        from nyx.tools import execute_tool
+        import nyx.tools
+        original_execute_tool = nyx.tools.execute_tool
+        try:
+            nyx.tools.execute_tool = lambda tool_call, context: "file content dummy"
+            res = subagent._execute_tool_call(tc, [])
+            assert res == "file content dummy"
+        finally:
+            nyx.tools.execute_tool = original_execute_tool
+
+        # Verify it was logged in all of the parent agent's loggers/audit trails!
+        assert len(calls_logged) == 1
+        assert calls_logged[0] == ("read_file", {"path": "dummy.py"})
+
+        assert len(results_logged) == 1
+        assert results_logged[0] == ("read_file", "file content dummy")
+
+        assert len(audits_logged) == 1
+        assert audits_logged[0] == ("read_file", {"path": "dummy.py"}, "file content dummy")
+
+    def test_subagent_loop_tool_logging(self, tmp_path):
+        from nyx.agent import Agent, ToolCall
+        from nyx.config import Config
+        from nyx.providers.base import LLMResponse
+        
+        config = Config(provider="openai", openai_api_key="sk-test", project_dir=str(tmp_path))
+        agent = Agent(config=config)
+        agent.setup()
+
+        calls_logged = []
+        agent.json_logger.log_tool_call = lambda tool_name, arguments: calls_logged.append((tool_name, arguments))
+
+        subagent = agent.subagents.spawn("test_sub", "system prompt")
+        
+        # Mock LLM provider for subagent
+        mock_response = LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="tc-1", name="read_file", arguments={"path": "dummy.py"})],
+            usage={"total_tokens": 10}
+        )
+        
+        class MockProvider:
+            def __init__(self):
+                self.calls = 0
+            def chat(self, messages, tools=None, stream=False, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return mock_response
+                # call finish on next step or return simple text
+                return LLMResponse(content="Done!", usage={"total_tokens": 5})
+
+        subagent._provider = MockProvider()
+
+        # Mock actual execution of the tool
+        import nyx.tools
+        original_execute_tool = nyx.tools.execute_tool
+        try:
+            nyx.tools.execute_tool = lambda tool_call, context: "content of file"
+            subagent.execute("task description")
+        finally:
+            nyx.tools.execute_tool = original_execute_tool
+
+        # Verify that calls_logged captured the tool call!
+        assert len(calls_logged) == 1
+        assert calls_logged[0] == ("read_file", {"path": "dummy.py"})
