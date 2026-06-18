@@ -560,8 +560,8 @@ class AnsiReplUI:
     def read_input(self) -> str:
         prompt = f"\n{c('You', USER_COLOR)}> "
         try:
-            import readline
             import re
+            __import__("readline")
             prompt = re.sub(r"(\033\[[0-9;]*[a-zA-Z])", r"\001\1\002", prompt)
         except ImportError:
             pass
@@ -950,8 +950,6 @@ def _make_cli_event_handler(agent: Agent, use_rich: bool = False) -> Callable[[d
 
         console = get_console()
         theme = get_theme_palette(agent.config)
-        p = theme.get("primary", "cyan")
-        s = theme.get("secondary", "magenta")
         a = theme.get("accent", "yellow")
         info = theme.get("info", "blue")
         success = theme.get("success", "green")

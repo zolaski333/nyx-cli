@@ -618,8 +618,8 @@ class RichReplUI:
         prompt_str = f"\n[bold {p}]nyx[/bold {p}] [dim]({mode} • {autonomy})[/dim] [bold {s}]❯[/bold {s} "
         
         try:
-            import readline
             import re
+            __import__("readline")
             with self.console.capture() as capture:
                 self.console.print(prompt_str, end="")
             ansi_prompt = capture.get()

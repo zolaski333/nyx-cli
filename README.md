@@ -394,7 +394,7 @@ Process isolation is enabled by default for subagents that can be recreated from
 
 ### 🌐 Web Search
 
-Built-in DuckDuckGo search — no API key needed. The agent can search the web and fetch pages.
+Built-in SearXNG JSON search is the default, with DuckDuckGo available as a legacy fallback. No API key is required. The agent can search the web and fetch pages.
 
 ### 💾 Persistent Memory
 
@@ -404,7 +404,7 @@ Conversations are saved to disk with persistent memory and basic summarisation s
 
 | Tool | Description |
 |------|-------------|
-| `web_search` | Search the internet (DuckDuckGo, free) |
+| `web_search` | Search the internet (SearXNG JSON by default, no API key) |
 | `web_fetch` | Fetch and extract text from any URL |
 | `subagent_run` | Spawn a subagent for a subtask |
 | `parallel_subagents` | Run multiple subagents in parallel |
@@ -458,12 +458,15 @@ export NYX_PROVIDER="anthropic"         # Override default provider
 
 See [`config.example.json`](config.example.json) for all available options.
 
-Priority chain: **Environment variables > config.json > Defaults**
+Priority chain: **Environment variables > trusted config.json > Defaults**
+
+Workspace-local configs (`./config.json` and `./.nyx/config.json`) are loaded only after the current folder is trusted. Trusted folders are stored in `~/.nyx/trusted_workspaces.json`. In non-interactive runs, untrusted local configs are skipped and Nyx falls back to global/default configuration.
 
 ### Security model
 
 - File reads and writes are restricted to the project sandbox unless an explicit allow path is configured.
 - File modifications are guarded by sandbox checks and approval prompts, but the project is still experimental.
+- Workspace-local config files are gated by Workspace Trust so a cloned repository cannot silently override Nyx settings before approval.
 - Simple shell commands run without a shell where practical. Composite commands and shell-control operators such as `&&`, `|`, redirection and command substitution require approval.
 - Dangerous-command keyword checks are only advisory UX guardrails. They are not a security boundary and can be bypassed with shell syntax, wrapper scripts, aliases, or platform-specific behavior. Use Docker/Podman sandbox isolation for real containment.
 - MCP servers receive a minimal environment by default; secrets are not inherited automatically.
@@ -502,7 +505,7 @@ nyx/
 ├── subagent.py          # Subagent spawning & management
 ├── subagent_worker.py   # Process-isolated subagent worker
 ├── async_subagent.py    # Parallel subagent execution
-├── web_search.py        # DuckDuckGo search + web fetch
+├── web_search.py        # SearXNG/DuckDuckGo search + web fetch
 ├── memory.py            # Persistent memory with summarisation
 └── providers/
     ├── __init__.py      # Provider factory

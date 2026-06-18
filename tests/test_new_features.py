@@ -1799,7 +1799,6 @@ class TestSubagentToolLogging:
     def test_subagent_tool_logging(self, tmp_path):
         from nyx.agent import Agent, ToolCall
         from nyx.config import Config
-        import json
 
         config = Config(provider="openai", openai_api_key="sk-test", project_dir=str(tmp_path))
         agent = Agent(config=config)
@@ -1821,7 +1820,6 @@ class TestSubagentToolLogging:
         tc = ToolCall(id="tc-sub", name="read_file", arguments={"path": "dummy.py"})
         
         # Mock actual execution of the tool
-        from nyx.tools import execute_tool
         import nyx.tools
         original_execute_tool = nyx.tools.execute_tool
         try:

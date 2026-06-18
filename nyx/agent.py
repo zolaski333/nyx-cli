@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Built-in tools
 # ---------------------------------------------------------------------------
 
-from nyx.tools import BUILTIN_TOOLS, ToolContext, execute_tool
+from nyx.tools import BUILTIN_TOOLS, ToolContext
 
 
 
