@@ -8,6 +8,8 @@ from .openrouter import OpenRouterProvider
 class OpenAIProvider(OpenRouterProvider):
     """Provider for OpenAI's API (compatible, same wire protocol)."""
 
+    provider_display_name = "OpenAI"
+
     def _build_headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.config.get_api_key()}",

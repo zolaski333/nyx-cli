@@ -4,11 +4,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from pathlib import Path
 
 import pytest
 
-from nyx.config import Config, ConfigError, DEFAULT_CONFIG
+from nyx.config import Config, ConfigError
 
 
 class TestConfig:

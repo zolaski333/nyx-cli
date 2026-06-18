@@ -13,7 +13,7 @@ from typing import Callable, TYPE_CHECKING
 
 from nyx.subagent import Subagent, SubagentResult, SubagentTask
 from nyx.config import Config
-from nyx.providers.base import ToolCall
+from nyx.providers.base import BaseLLMProvider, ToolCall, ToolDefinition
 
 if TYPE_CHECKING:
     from nyx.tools import ToolContext
@@ -70,7 +70,7 @@ class AsyncSubagentManager:
         self,
         config: Config | None = None,
         max_workers: int = 4,
-        provider_factory: Callable | None = None,
+        provider_factory: Callable[[], BaseLLMProvider] | None = None,
         process_isolation: bool = True,
         default_timeout_seconds: float | None = None,
     ) -> None:
@@ -82,11 +82,11 @@ class AsyncSubagentManager:
         self._lock = threading.Lock()
         self._agents: dict[str, Subagent] = {}
         self._results: dict[str, list[SubagentResult]] = {}
-        self._default_tools: list | None = None
+        self._default_tools: list[ToolDefinition] | None = None
         self._tool_executor: Callable[[ToolCall], str] | None = None
         self._context: ToolContext | None = None
 
-    def set_default_tools(self, tools: list | None) -> None:
+    def set_default_tools(self, tools: list[ToolDefinition] | None) -> None:
         """Set the default tool subset for spawned subagents."""
         self._default_tools = tools
         with self._lock:
@@ -154,6 +154,8 @@ class AsyncSubagentManager:
                 config=self._config,
                 tools=agent._tools,
                 timeout_seconds=timeout_seconds,
+                on_command_approval=self._context.on_command_approval if self._context else None,
+                on_file_approval=self._context.on_file_approval if self._context else None,
             )
         else:
             result = agent.execute_task(task, tools=agent._tools)
@@ -186,7 +188,7 @@ class AsyncSubagentManager:
 
             for idx, pt in enumerate(tasks):
                 # Ensure subagent exists
-                agent = self._agents.get(pt.name) or self.spawn(
+                self._agents.get(pt.name) or self.spawn(
                     name=pt.name,
                     system_prompt=pt.system_prompt,
                     max_tokens=pt.max_tokens,
@@ -197,11 +199,11 @@ class AsyncSubagentManager:
                 future_to_task[future] = (idx, pt)
 
             max_timeout = None
-            timeouts = [
-                pt.timeout_seconds or self.default_timeout_seconds
-                for pt in tasks
-                if (pt.timeout_seconds or self.default_timeout_seconds) is not None
-            ]
+            timeouts: list[float] = []
+            for pt in tasks:
+                timeout_seconds = pt.timeout_seconds or self.default_timeout_seconds
+                if timeout_seconds is not None:
+                    timeouts.append(timeout_seconds)
             if timeouts:
                 max_timeout = max(timeouts)
 
@@ -242,17 +244,17 @@ class AsyncSubagentManager:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-        for result in ordered_results:
-            if result is None:
+        for ordered_result in ordered_results:
+            if ordered_result is None:
                 continue
-            if result.status == "timed_out":
+            if ordered_result.status == "timed_out":
                 parallel_result.timed_out += 1
-            if result.error:
+            if ordered_result.error:
                 parallel_result.failed += 1
             else:
                 parallel_result.completed += 1
-            parallel_result.total_tokens += result.tokens_used
-            parallel_result.results.append(result)
+            parallel_result.total_tokens += ordered_result.tokens_used
+            parallel_result.results.append(ordered_result)
 
         return parallel_result
 

@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import tempfile
-from pathlib import Path
+import multiprocessing as mp
 
 from nyx.memory import MemoryManager, Conversation, ConversationEntry, _estimate_tokens
+
+
+def _save_note_worker(memory_dir: str, note: str) -> None:
+    memory = MemoryManager(memory_dir=memory_dir, auto_summarise=False)
+    memory._save_note(note, "parallel")
 
 
 class TestMemoryManager:
@@ -87,6 +92,22 @@ class TestMemoryManager:
         assert memory2.current is not None
         assert len(memory2.current.entries) == 1
         assert memory2.current.entries[0].content == "persistent message"
+
+    def test_parallel_note_writes_are_preserved(self):
+        ctx = mp.get_context("spawn")
+        workers = [
+            ctx.Process(target=_save_note_worker, args=(self.tmpdir, f"note-{i}"))
+            for i in range(4)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+            assert worker.exitcode == 0
+
+        notes = self.memory._load_notes()
+        contents = {note["content"] for note in notes}
+        assert {f"note-{i}" for i in range(4)} <= contents
 
     def test_estimate_tokens(self):
         assert _estimate_tokens("hello") == 1  # 4 chars = 1 token

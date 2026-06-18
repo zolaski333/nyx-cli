@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -343,7 +343,7 @@ def run_tests(
 # ---------------------------------------------------------------------------
 
 # Regex patterns for common test frameworks
-FAILURE_PATTERNS: list[re.Pattern] = [
+FAILURE_PATTERNS: list[re.Pattern[str]] = [
     # Pytest:  FAILED tests/test_agent.py::test_name - AssertionError: message
     # Also:    FAILED test_fail.py::test_should_fail - assert (1 + 1) == 3
     re.compile(
@@ -659,7 +659,7 @@ class _WorkspaceSnapshot:
         return restored
 
 
-def _iter_snapshot_files(root: Path):
+def _iter_snapshot_files(root: Path) -> Any:
     for current, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SNAPSHOT_EXCLUDED_DIRS]
         current_path = Path(current)
@@ -704,7 +704,7 @@ def _failure_score(test_result: TestResult) -> int:
 
 
 def _auto_correct_loop_legacy(
-    fix_function: Callable,
+    fix_function: Callable[..., str],
     root: str | Path | None = None,
     test_command: str | None = None,
     max_iterations: int = 5,
@@ -726,7 +726,7 @@ def _auto_correct_loop_legacy(
     """
     root = Path(root).resolve() if root else Path.cwd().resolve()
     result = CorrectionResult()
-    history: list[dict] = []
+    history: list[dict[str, Any]] = []
 
     for iteration in range(1, max_iterations + 1):
         logger.info("Test iteration %d/%d", iteration, max_iterations)
@@ -791,7 +791,7 @@ def _auto_correct_loop_legacy(
 
 
 def auto_correct_loop(
-    fix_function: Callable,
+    fix_function: Callable[..., str],
     root: str | Path | None = None,
     test_command: str | None = None,
     max_iterations: int = 5,
@@ -810,7 +810,7 @@ def auto_correct_loop(
     """
     root = Path(root).resolve() if root else Path.cwd().resolve()
     result = CorrectionResult()
-    history: list[dict] = []
+    history: list[dict[str, Any]] = []
     seen_signatures: set[str] = set()
 
     for iteration in range(1, max_iterations + 1):
@@ -939,10 +939,10 @@ def auto_correct_loop(
 
 
 def _call_fix_function_inner(
-    fix_function: Callable,
+    fix_function: Callable[..., str],
     failures: list[TestFailure],
     raw_output: str,
-    history: list[dict],
+    history: list[dict[str, Any]],
     fix_timeout: int | None,
 ) -> str:
     import inspect
@@ -977,11 +977,11 @@ def _call_fix_function_inner(
 
 
 def _multiprocess_fix_worker(
-    queue,
-    fix_function: Callable,
+    queue: Any,
+    fix_function: Callable[..., str],
     failures: list[TestFailure],
     raw_output: str,
-    history: list[dict],
+    history: list[dict[str, Any]],
     fix_timeout: int | None,
 ) -> None:
     try:
@@ -992,10 +992,10 @@ def _multiprocess_fix_worker(
 
 
 def _call_fix_function(
-    fix_function: Callable,
+    fix_function: Callable[..., str],
     failures: list[TestFailure],
     raw_output: str,
-    history: list[dict],
+    history: list[dict[str, Any]],
     fix_timeout: int | None,
 ) -> str:
     if fix_timeout is not None and fix_timeout > 0:
@@ -1027,7 +1027,7 @@ def _call_fix_function(
             try:
                 val = queue.get_nowait()
                 if val["ok"]:
-                    return val["result"]
+                    return str(val["result"])
                 else:
                     raise val["error"]
             except Exception as e:

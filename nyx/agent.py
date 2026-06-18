@@ -189,8 +189,10 @@ class AgentContext:
 class Agent:
     """The main agent that orchestrates everything."""
 
-    # Commands that are explicitly blocked (destructive)
-    # These will trigger an interactive user approval prompt.
+    # Advisory command-risk heuristics, not a security boundary. Clever shell
+    # syntax, local scripts, aliases, or platform quirks can bypass keyword
+    # matching; Docker/OS sandbox isolation is the real containment layer.
+    # Matches trigger an interactive user approval prompt.
     # Uses word-boundary matching to avoid false positives
     # (e.g., "cp " won't match "scp ", "mv " won't match "tmux ").
     DANGEROUS_PATTERNS: list[str] = [
@@ -210,7 +212,7 @@ class Agent:
 
     @staticmethod
     def _is_dangerous_command(command: str) -> bool:
-        """Check if a command matches dangerous patterns using word-boundary matching."""
+        """Return whether command matches advisory dangerous-command heuristics."""
         cmd_lower = command.strip().lower()
 
         # Check dangerous operators (only when used as standalone tokens)
@@ -493,7 +495,11 @@ class Agent:
     def _inject_memory_summary(self) -> None:
         """Inject a summary of past conversations into the LLM context."""
         try:
-            convs = self.memory.list_conversations()
+            current_id = self.memory.current.id if self.memory.current else ""
+            convs = [
+                conv for conv in self.memory.list_conversations()
+                if conv.get("id") != current_id
+            ]
             if not convs:
                 return
 

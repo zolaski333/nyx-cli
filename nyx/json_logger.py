@@ -16,6 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from queue import Queue
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -90,9 +91,6 @@ class JSONLogEntry:
 # JSON Logger
 # ---------------------------------------------------------------------------
 
-
-from queue import Queue
-
 class JSONLogger:
     """Optional structured JSON logger with session tracking.
 
@@ -115,7 +113,7 @@ class JSONLogger:
         self._lock = threading.Lock()
         self._file: Any = None
         self._file_path: Path | None = None
-        self._queue: Queue = Queue()
+        self._queue: Queue[JSONLogEntry] = Queue()
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 

@@ -1,4 +1,4 @@
-"""Central tool registry and execution dispatcher for Nyx."""
+﻿"""Central tool registry and execution dispatcher for Nyx."""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from nyx.providers.base import ToolCall, ToolDefinition
 from nyx.web_search import search_web, format_search_results, fetch_page
-from nyx.sandbox import PathTraversalError
+from nyx.sandbox import PathTraversalError, SandboxDenyPathError
 from nyx.permissions import PermissionLevel
 from nyx.repo_map import build_repo_map, build_repo_map_short
 from nyx.search_code import search_code as _search_code
@@ -20,6 +20,8 @@ from nyx.test_loop import run_tests as _run_tests
 from nyx.test_loop import auto_correct_loop, format_failures_for_llm, TestFailure
 
 logger = logging.getLogger(__name__)
+
+SandboxPathError = PathTraversalError | SandboxDenyPathError
 
 
 IGNORED_DIRS: set[str] = {
@@ -164,7 +166,7 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="execute_command",
-        description="Execute a shell command on the local system. Most commands are allowed. Destructive commands (rm, sudo, chmod, curl, etc.) require user approval before execution.",
+        description="Execute a shell command on the local system. Keyword and shell-operator checks are advisory UX guardrails only; they can be bypassed by shell syntax or scripts. Use Docker sandbox isolation for real containment. Destructive-looking commands require user approval before execution.",
         parameters={
             "type": "object",
             "properties": {
@@ -413,7 +415,13 @@ def _approval_unavailable() -> tuple[bool, str]:
 
 
 def is_dangerous_command(command: str) -> bool:
-    """Check if a command matches dangerous patterns using word-boundary matching."""
+    """Return whether command matches advisory dangerous-command heuristics.
+
+    This blacklist is intentionally only a prompt trigger. It is not a security
+    boundary because shell syntax, scripts, aliases, and platform-specific
+    behavior can bypass keyword matching. Use Docker/OS sandboxing for actual
+    containment of shell execution.
+    """
     cmd_lower = command.strip().lower()
     for op in DANGEROUS_OPERATORS:
         if re.search(rf'(?:^|\s){re.escape(op)}(?:\s|$)', cmd_lower):
@@ -481,6 +489,277 @@ def _build_command_invocation(command: str, context: ToolContext) -> tuple[list[
 
     return context.sandbox.prepare_command(command), True
 
+
+_EXTERNAL_WRITE_TOOL_HINTS = {
+    "write", "create", "delete", "remove", "save", "append",
+    "modify", "patch", "edit", "update", "set", "post", "put",
+}
+_EXTERNAL_EXEC_TOOL_HINTS = {
+    "command", "cmd", "shell", "exec", "execute", "run", "script",
+    "terminal", "process", "subprocess", "bash", "zsh", "sh",
+    "powershell", "pwsh",
+}
+_EXTERNAL_CODE_TOOL_HINTS = {
+    "code", "python", "javascript", "typescript", "node", "ruby",
+    "perl", "interpreter", "eval", "repl",
+}
+_EXTERNAL_PATH_HINTS = {
+    "path", "file", "dir", "directory", "uri", "folder", "dest",
+    "src", "source", "target", "location",
+}
+_EXTERNAL_BROAD_EXEC_FIELD_HINTS = {
+    "args", "argv", "payload", "input", "query", "bash_content",
+}
+_EXTERNAL_CODE_FIELD_HINTS = _EXTERNAL_CODE_TOOL_HINTS | {
+    "payload", "source", "content", "input", "query", "snippet",
+}
+
+
+def _words_from_text(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _schema_text(schema: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("title", "description", "format", "contentMediaType"):
+        value = schema.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    for key in (
+        "x-nyx-content", "x-nyx-security", "x-nyx-type",
+        "x-content-type", "x-executable-type",
+    ):
+        value = schema.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    return " ".join(parts)
+
+
+def _schema_declares(schema: dict[str, Any], *labels: str) -> bool:
+    wanted = {label.lower() for label in labels}
+    for key in (
+        "x-nyx-content", "x-nyx-security", "x-nyx-type",
+        "x-content-type", "x-executable-type",
+    ):
+        value = schema.get(key)
+        if isinstance(value, str) and value.lower() in wanted:
+            return True
+    if schema.get("x-nyx-command") is True and "command" in wanted:
+        return True
+    if schema.get("x-nyx-executable") is True and ({"command", "code", "executable"} & wanted):
+        return True
+    return False
+
+
+def _get_external_tool_definition(name: str, context: ToolContext) -> ToolDefinition | None:
+    for provider in (context.mcp, context.skills):
+        if not provider or not hasattr(provider, "get_tool_definitions"):
+            continue
+        try:
+            for definition in provider.get_tool_definitions():
+                if definition.name == name:
+                    return ToolDefinition(definition.name, definition.description, definition.parameters)
+        except Exception:
+            continue
+    for definition in context.subagent_tools:
+        if definition.name == name:
+            return definition
+    return None
+
+
+def _external_field_intent(
+    *,
+    tool_name: str,
+    tool_description: str,
+    key_path: str,
+    schema: dict[str, Any],
+) -> str:
+    key_words = _words_from_text(key_path)
+    schema_words = _words_from_text(_schema_text(schema))
+    tool_words = _words_from_text(f"{tool_name} {tool_description}")
+
+    if _schema_declares(schema, "code", "script", "source-code"):
+        return "code"
+    if _schema_declares(schema, "command", "shell", "executable"):
+        return "command"
+    if _schema_declares(schema, "path", "file", "directory"):
+        return "path"
+
+    tool_is_exec = bool(tool_words & _EXTERNAL_EXEC_TOOL_HINTS)
+    tool_is_code = bool(tool_words & _EXTERNAL_CODE_TOOL_HINTS)
+
+    if (key_words | schema_words) & _EXTERNAL_PATH_HINTS:
+        return "path"
+    if ((key_words | schema_words) & _EXTERNAL_CODE_FIELD_HINTS) and (tool_is_exec or tool_is_code):
+        return "code" if tool_is_code else "command"
+    if (key_words | schema_words) & _EXTERNAL_EXEC_TOOL_HINTS:
+        return "command"
+    if ((key_words | schema_words) & _EXTERNAL_BROAD_EXEC_FIELD_HINTS) and (tool_is_exec or tool_is_code):
+        return "code" if tool_is_code else "command"
+    if tool_is_code:
+        return "code"
+    if tool_is_exec:
+        return "command"
+    return ""
+
+
+def _approve_external_code_payload(tool_name: str, key_path: str, value: str, context: ToolContext) -> tuple[bool, str]:
+    target = f"{tool_name}.{key_path}: {value[:200]}"
+    if context.on_command_approval:
+        return context.on_command_approval(target)
+    return _approval_unavailable()
+
+
+def _sanitize_external_path(
+    *,
+    tool_name: str,
+    key_path: str,
+    value: str,
+    context: ToolContext,
+    is_write_tool: bool,
+) -> tuple[bool, str, str]:
+    clean_val = value[7:] if value.startswith("file://") else value
+    key_lower = key_path.lower()
+    is_write_arg = is_write_tool or any(w in key_lower for w in ["dest", "target", "output"])
+
+    try:
+        if is_write_arg:
+            resolved = context.sandbox.resolve(clean_val, for_write=True)
+            approved, reason, _level = context.permissions.authorize_file_write(str(resolved))
+        else:
+            resolved = context.sandbox.safe_read_path(clean_val)
+            approved, reason, _level = context.permissions.authorize_file_read(str(resolved))
+        if not approved:
+            return False, f"[SECURITY] Permission denied by policy for path '{clean_val}': {reason}", value
+        return True, "", str(resolved)
+    except (PathTraversalError, SandboxDenyPathError):
+        if context.audit:
+            context.audit.log_security_event("path_traversal_blocked", {
+                "path": clean_val,
+                "tool": tool_name,
+                "argument": key_path,
+            })
+        return False, f"[SECURITY] Sandbox path blocked for path '{clean_val}'", value
+    except Exception as e:
+        return False, f"[SECURITY] Error validating path '{clean_val}': {e}", value
+
+
+def _format_sandbox_path_error(raw_path: str, err: SandboxPathError, context: ToolContext) -> str:
+    event: dict[str, Any] = {"path": raw_path}
+    if isinstance(err, PathTraversalError):
+        event.update({"resolved": str(err.resolved), "root": err.root})
+        message = "Path traversal blocked"
+    else:
+        event.update({"pattern": err.pattern})
+        message = "Path denied by sandbox rule"
+    context.audit.log_security_event("sandbox_path_blocked", event)
+    return f"[SECURITY] {message}: {raw_path}"
+
+
+def _sanitize_external_value(
+    *,
+    tool_name: str,
+    tool_description: str,
+    key_path: str,
+    value: Any,
+    schema: dict[str, Any],
+    context: ToolContext,
+    is_write_tool: bool,
+) -> tuple[bool, str, Any]:
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        schema_type = next((t for t in schema_type if t != "null"), schema_type[0] if schema_type else None)
+
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
+        additional = schema.get("additionalProperties", False)
+        sanitized_obj: dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            if child_key in properties:
+                child_schema = properties[child_key] if isinstance(properties[child_key], dict) else {}
+            elif additional is True:
+                child_schema = {}
+            elif isinstance(additional, dict):
+                child_schema = additional
+            else:
+                dotted_key = f"{key_path}.{child_key}" if key_path else str(child_key)
+                return (
+                    False,
+                    f"[SECURITY] External tool '{tool_name}' received undocumented argument '{dotted_key}'.",
+                    value,
+                )
+            ok, err, sanitized_child = _sanitize_external_value(
+                tool_name=tool_name,
+                tool_description=tool_description,
+                key_path=f"{key_path}.{child_key}" if key_path else child_key,
+                value=child_value,
+                schema=child_schema,
+                context=context,
+                is_write_tool=is_write_tool,
+            )
+            if not ok:
+                return ok, err, value
+            sanitized_obj[child_key] = sanitized_child
+        return True, "", sanitized_obj
+
+    if isinstance(value, list):
+        item_schema = schema.get("items", {})
+        if not isinstance(item_schema, dict):
+            item_schema = {}
+        sanitized_items: list[Any] = []
+        for i, item in enumerate(value):
+            ok, err, sanitized_item = _sanitize_external_value(
+                tool_name=tool_name,
+                tool_description=tool_description,
+                key_path=f"{key_path}[{i}]",
+                value=item,
+                schema=item_schema,
+                context=context,
+                is_write_tool=is_write_tool,
+            )
+            if not ok:
+                return ok, err, value
+            sanitized_items.append(sanitized_item)
+        return True, "", sanitized_items
+
+    if not isinstance(value, str) or not value.strip():
+        return True, "", value
+
+    intent = _external_field_intent(
+        tool_name=tool_name,
+        tool_description=tool_description,
+        key_path=key_path,
+        schema=schema,
+    )
+    if intent == "path":
+        return _sanitize_external_path(
+            tool_name=tool_name,
+            key_path=key_path,
+            value=value,
+            context=context,
+            is_write_tool=is_write_tool,
+        )
+    if intent == "command":
+        approved, reason, _level = authorize_command(value, context)
+        if not approved:
+            return (
+                False,
+                f"[SECURITY] Permission denied for command-like argument '{key_path}' "
+                f"in '{tool_name}': {reason}",
+                value,
+            )
+        return True, "", context.sandbox.prepare_command(value)
+    if intent == "code":
+        approved, reason = _approve_external_code_payload(tool_name, key_path, value, context)
+        if not approved:
+            return False, f"[SECURITY] Executable code argument '{key_path}' in '{tool_name}' denied: {reason}", value
+        return True, "", value
+
+    return True, "", value
+
+
 def _validate_and_sanitize_external_tool_args(
     name: str,
     args: dict[str, Any],
@@ -489,75 +768,28 @@ def _validate_and_sanitize_external_tool_args(
     """Validate and sanitize file paths and commands in external tool arguments (MCP and Skills)
     to enforce Sandbox and Permission rules.
     """
-    sanitized = dict(args)
     name_lower = name.lower()
+    definition = _get_external_tool_definition(name, context)
+    schema = definition.parameters if definition else {"type": "object", "properties": {}}
+    if not isinstance(schema, dict) or schema.get("type", "object") != "object":
+        return False, f"[SECURITY] External tool '{name}' has no valid object parameter schema.", args
+    tool_description = definition.description if definition else ""
 
     # Determine if the tool name suggests a write operation
-    is_write_tool = any(w in name_lower for w in [
-        "write", "create", "delete", "remove", "save", "append", 
-        "modify", "patch", "edit", "update", "set", "post", "put"
-    ])
+    tool_words = _words_from_text(name_lower) | _words_from_text(tool_description)
+    is_write_tool = bool(tool_words & _EXTERNAL_WRITE_TOOL_HINTS)
 
-    for key, val in list(sanitized.items()):
-        if not isinstance(val, str):
-            continue
-
-        key_lower = key.lower()
-        
-        # 1. Identify potential file paths
-        is_path_key = any(p in key_lower for p in [
-            "path", "file", "dir", "uri", "folder", "dest", "src", "target", "location"
-        ])
-        
-        if is_path_key and val.strip():
-            # Clean path from potential URI scheme prefix like file://
-            clean_val = val
-            if clean_val.startswith("file://"):
-                clean_val = clean_val[7:]
-            
-            is_write_arg = is_write_tool or any(w in key_lower for w in ["dest", "target", "output"])
-            
-            try:
-                # Check sandbox first
-                if is_write_arg:
-                    resolved = context.sandbox.resolve(clean_val, for_write=True)
-                    # Check write permissions
-                    approved, reason, level = context.permissions.authorize_file_write(str(resolved))
-                else:
-                    resolved = context.sandbox.safe_read_path(clean_val)
-                    # Check read permissions
-                    approved, reason, level = context.permissions.authorize_file_read(str(resolved))
-                
-                if not approved:
-                    return False, f"[SECURITY] Permission denied by policy for path '{clean_val}': {reason}", args
-                
-                # Replace with safe resolved path
-                sanitized[key] = str(resolved)
-                
-            except PathTraversalError:
-                if context.audit:
-                    context.audit.log_security_event("path_traversal_blocked", {
-                        "path": clean_val,
-                        "tool": name,
-                    })
-                return False, f"[SECURITY] Path traversal blocked for path '{clean_val}'", args
-            except Exception as e:
-                return False, f"[SECURITY] Error validating path '{clean_val}': {e}", args
-
-        # 2. Identify potential shell commands
-        is_cmd_key = any(c in key_lower for c in [
-            "command", "cmd", "shell", "exec", "run", "script"
-        ])
-        
-        if is_cmd_key and val.strip():
-            # Check shell permissions
-            approved, reason, level = authorize_command(val, context)
-            if not approved:
-                return False, f"[SECURITY] Permission denied for command '{val[:100]}': {reason}", args
-            
-            # Prepare command (wraps with cd sandbox if needed)
-            sanitized[key] = context.sandbox.prepare_command(val)
-
+    ok, err, sanitized = _sanitize_external_value(
+        tool_name=name,
+        tool_description=tool_description,
+        key_path="",
+        value=args,
+        schema=schema,
+        context=context,
+        is_write_tool=is_write_tool,
+    )
+    if not ok:
+        return False, err, args
     return True, "", sanitized
 
 # ---------------------------------------------------------------------------
@@ -763,13 +995,8 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             end_line = args.get("end_line")
             try:
                 resolved = context.sandbox.safe_read_path(raw_path)
-            except PathTraversalError as e:
-                context.audit.log_security_event("path_traversal_blocked", {
-                    "path": raw_path,
-                    "resolved": str(e.resolved),
-                    "root": e.root,
-                })
-                return f"[SECURITY] Path traversal blocked: {raw_path}"
+            except (PathTraversalError, SandboxDenyPathError) as e:
+                return _format_sandbox_path_error(raw_path, e, context)
             except Exception as e:
                 return f"Error resolving path: {e}"
 
@@ -810,13 +1037,8 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             content = args.get("content", "")
             try:
                 resolved = context.sandbox.resolve(raw_path, for_write=True)
-            except PathTraversalError as e:
-                context.audit.log_security_event("path_traversal_blocked", {
-                    "path": raw_path,
-                    "resolved": str(e.resolved),
-                    "root": e.root,
-                })
-                return f"[SECURITY] Path traversal blocked: {raw_path}"
+            except (PathTraversalError, SandboxDenyPathError) as e:
+                return _format_sandbox_path_error(raw_path, e, context)
             except Exception as e:
                 return f"Error resolving path: {e}"
 
@@ -825,7 +1047,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 "write", str(resolved), len(content), success=success,
                 error="" if success else message,
             )
-            return message
+            return str(message)
 
         # -- Apply diff (with patch parsing, validation, conflict detection) --
         if name == "apply_diff":
@@ -834,13 +1056,8 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
 
             try:
                 resolved = context.sandbox.resolve(raw_path, for_write=True)
-            except PathTraversalError as e:
-                context.audit.log_security_event("path_traversal_blocked", {
-                    "path": raw_path,
-                    "resolved": str(e.resolved),
-                    "root": e.root,
-                })
-                return f"[SECURITY] Path traversal blocked: {raw_path}"
+            except (PathTraversalError, SandboxDenyPathError) as e:
+                return _format_sandbox_path_error(raw_path, e, context)
             except Exception as e:
                 return f"Error resolving path: {e}"
 
@@ -885,18 +1102,18 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                         success=fb_success, error="" if fb_success else fb_message,
                     )
                     fallback_note = "[auto-fallback from apply_diff] " if fb_success else "[fallback also failed] "
-                    return fallback_note + fb_message
-                return message
+                    return fallback_note + str(fb_message)
+                return str(message)
 
-            return message
+            return str(message)
 
         # -- Rollback file --
         if name == "rollback_file":
             raw_path = args.get("path", "")
             try:
                 resolved = context.sandbox.resolve(raw_path, for_write=True)
-            except PathTraversalError:
-                return f"[SECURITY] Path traversal blocked: {raw_path}"
+            except (PathTraversalError, SandboxDenyPathError) as e:
+                return _format_sandbox_path_error(raw_path, e, context)
             except Exception as e:
                 return f"Error resolving path: {e}"
 
@@ -905,7 +1122,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 "rollback", str(resolved), 0, success=success,
                 error="" if success else message,
             )
-            return message
+            return str(message)
 
         # -- Patch history --
         if name == "patch_history":
@@ -917,7 +1134,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             for h in history:
                 lines.append(
                     f"  [{h.get('type', '?')}] {h.get('filepath', '?')} "
-                    f"— {h.get('summary', '?')} "
+                    f"â€” {h.get('summary', '?')} "
                     f"({h.get('time', '?')})"
                 )
             return "\n".join(lines)
@@ -928,13 +1145,8 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             content = args.get("content", "")
             try:
                 resolved = context.sandbox.resolve(raw_path, for_write=True)
-            except PathTraversalError as e:
-                context.audit.log_security_event("path_traversal_blocked", {
-                    "path": raw_path,
-                    "resolved": str(e.resolved),
-                    "root": e.root,
-                })
-                return f"[SECURITY] Path traversal blocked: {raw_path}"
+            except (PathTraversalError, SandboxDenyPathError) as e:
+                return _format_sandbox_path_error(raw_path, e, context)
             except Exception as e:
                 return f"Error resolving path: {e}"
 
@@ -952,7 +1164,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 "append", str(resolved), len(content), success=success,
                 error="" if success else message,
             )
-            return message
+            return str(message)
 
         # -- List files (with sandbox) --
         if name == "list_files":
@@ -960,13 +1172,8 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             recursive = args.get("recursive", False)
             try:
                 resolved = context.sandbox.resolve(raw_path)
-            except PathTraversalError as e:
-                context.audit.log_security_event("path_traversal_blocked", {
-                    "path": raw_path,
-                    "resolved": str(e.resolved),
-                    "root": e.root,
-                })
-                return f"[SECURITY] Path traversal blocked: {raw_path}"
+            except (PathTraversalError, SandboxDenyPathError) as e:
+                return _format_sandbox_path_error(raw_path, e, context)
             except Exception as e:
                 return f"Error resolving path: {e}"
 
@@ -1039,7 +1246,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             try:
                 import re
                 pattern = re.compile(rf"\b{re.escape(symbol_name)}\b")
-                results = []
+                reference_results: list[str] = []
                 for dirpath, _, filenames in os.walk(root):
                     dir_parts = Path(dirpath).parts
                     if any(part.startswith(".") or part in ("node_modules", "venv", "__pycache__", "build", "dist") for part in dir_parts):
@@ -1053,16 +1260,16 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                             for i, line in enumerate(content.splitlines(), 1):
                                 if pattern.search(line):
                                     rel_path = str(fpath.relative_to(root))
-                                    results.append(f"{rel_path}:{i}: {line.strip()}")
+                                    reference_results.append(f"{rel_path}:{i}: {line.strip()}")
                         except Exception:
                             continue
-                if not results:
+                if not reference_results:
                     return f"No references found for symbol '{symbol_name}'."
-                total_found = len(results)
+                total_found = len(reference_results)
                 if total_found > 100:
-                    results = results[:100]
-                    results.append(f"... and {total_found - 100} more references.")
-                return "\n".join(results)
+                    reference_results = reference_results[:100]
+                    reference_results.append(f"... and {total_found - 100} more references.")
+                return "\n".join(reference_results)
             except Exception as e:
                 logger.error("find_references error: %s", e)
                 return f"Error finding references: {e}"
@@ -1082,7 +1289,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 if result.failures:
                     parts.append(f"\nFailures ({len(result.failures)}):")
                     for f in result.failures[:10]:
-                        parts.append(f"  • {f.summary()}")
+                        parts.append(f"  â€¢ {f.summary()}")
                     if len(result.failures) > 10:
                         parts.append(f"  ... and {len(result.failures) - 10} more")
                 if result.stdout:
@@ -1112,7 +1319,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             def _fix_with_subagent(
                 failures: list[TestFailure],
                 raw_output: str,
-                history: list[dict] = None,
+                history: list[dict[str, Any]] | None = None,
                 attempt_timeout: int | None = None,
             ) -> str:
                 if not failures and not raw_output:
@@ -1159,7 +1366,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                             logger.warning("Subagent test fixer timed out after %s seconds.", attempt_timeout or fix_timeout)
                             return ""
                         return f"Subagent error: {result.error}"
-                    return result.output[:500]
+                    return str(result.output[:500])
                 except Exception as e:
                     return f"Fix error: {e}"
 
@@ -1177,15 +1384,15 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 )
                 parts = []
                 if correction.success:
-                    parts.append(f"✅ All tests passed after {correction.iterations} iteration(s)!")
+                    parts.append(f"âœ… All tests passed after {correction.iterations} iteration(s)!")
                 else:
-                    parts.append(f"❌ Tests still failing after {correction.iterations} iteration(s).")
+                    parts.append(f"âŒ Tests still failing after {correction.iterations} iteration(s).")
                 if correction.rolled_back:
                     parts.append("Rollback: reverted a regressing correction.")
                 if correction.corrections:
                     parts.append("\nCorrections applied:")
                     for c in correction.corrections:
-                        parts.append(f"  • {c}")
+                        parts.append(f"  â€¢ {c}")
                 if correction.attempts:
                     parts.append("\nAttempts:")
                     for a in correction.attempts[-5:]:
@@ -1193,15 +1400,15 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                         if len(a.changed_files) > 5:
                             changed += f", ... and {len(a.changed_files) - 5} more"
                         parts.append(
-                            f"  • #{a.iteration}: score {a.before_score}->{a.after_score}; "
+                            f"  â€¢ #{a.iteration}: score {a.before_score}->{a.after_score}; "
                             f"{changed}"
                             + ("; rolled back" if a.rolled_back else "")
                             + ("; stalled" if a.stalled else "")
                         )
                 if correction.errors:
                     parts.append("\nIssues:")
-                    for e in correction.errors:
-                        parts.append(f"  • {e}")
+                    for correction_error in correction.errors:
+                        parts.append(f"  â€¢ {correction_error}")
                 if correction.final_result:
                     parts.append(f"\nFinal: {correction.final_result.summary}")
                 return "\n".join(parts)
@@ -1219,14 +1426,14 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             ok, err, sanitized_args = _validate_and_sanitize_external_tool_args(name, args, context)
             if not ok:
                 return err
-            return context.mcp.call_tool(name, sanitized_args)
+            return str(context.mcp.call_tool(name, sanitized_args))
 
         # -- Skill tools --
         if name.startswith("skill_") and context.skills:
             ok, err, sanitized_args = _validate_and_sanitize_external_tool_args(name, args, context)
             if not ok:
                 return err
-            return context.skills.execute_skill(name[6:], sanitized_args)
+            return str(context.skills.execute_skill(name[6:], sanitized_args))
 
         logger.warning("Unknown tool called: %s", name)
         return f"Unknown tool: {name}"

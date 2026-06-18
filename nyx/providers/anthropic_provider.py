@@ -6,11 +6,13 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable
 
-from .base import BaseLLMProvider, LLMResponse, ToolCall, ToolDefinition
+from .base import BaseLLMProvider, LLMResponse, ToolCall, ToolDefinition, format_api_error
 
 
 class AnthropicProvider(BaseLLMProvider):
     """Provider for Anthropic's Claude API."""
+
+    provider_display_name = "Anthropic"
 
     def chat(
         self,
@@ -24,26 +26,26 @@ class AnthropicProvider(BaseLLMProvider):
         timeout = self.config.request_timeout
 
         # Convert messages to Anthropic format
-        system_blocks = []
-        anthropic_messages = []
+        system_blocks: list[dict[str, Any]] = []
+        anthropic_messages: list[dict[str, Any]] = []
         for msg in messages:
             if msg["role"] == "system":
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    if content:
-                        system_blocks.append({"type": "text", "text": content})
-                elif isinstance(content, list):
-                    for block in content:
+                system_content = msg.get("content", "")
+                if isinstance(system_content, str):
+                    if system_content:
+                        system_blocks.append({"type": "text", "text": system_content})
+                elif isinstance(system_content, list):
+                    for block in system_content:
                         system_blocks.append(dict(block))
             else:
                 role = "assistant" if msg["role"] == "assistant" else "user"
-                content = []
+                message_blocks: list[dict[str, Any]] = []
                 msg_content = msg.get("content")
                 if isinstance(msg_content, str):
-                    content.append({"type": "text", "text": msg_content})
+                    message_blocks.append({"type": "text", "text": msg_content})
                 elif isinstance(msg_content, list):
-                    content = msg_content
-                anthropic_messages.append({"role": role, "content": content})
+                    message_blocks = msg_content
+                anthropic_messages.append({"role": role, "content": message_blocks})
 
         payload: dict[str, Any] = {
             "model": self.config.model,
@@ -64,20 +66,22 @@ class AnthropicProvider(BaseLLMProvider):
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-        for attempt in range(2):
-            try:
-                if stream:
-                    return self._stream_response(request, timeout, on_token)
-                return self._non_stream_response(request, timeout)
-            except urllib.error.HTTPError as err:
-                error_body = err.read().decode("utf-8", errors="replace")
-                if err.code == 429 and attempt == 0:
-                    print("\n[Rate limit] retrying...")
-                    continue
-                raise RuntimeError(error_body.strip() or f"HTTP {err.code}: {err.reason}") from err
-            except urllib.error.URLError as err:
-                raise RuntimeError(f"Network error: {err}") from err
-        raise RuntimeError("Still rate limited after retry.")
+        try:
+            if stream:
+                return self._stream_response(request, timeout, on_token)
+            return self._non_stream_response(request, timeout)
+        except urllib.error.HTTPError as err:
+            error_body = err.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                format_api_error(
+                    self.provider_display_name,
+                    status=err.code,
+                    reason=err.reason,
+                    body=error_body,
+                )
+            ) from err
+        except urllib.error.URLError as err:
+            raise RuntimeError(f"Network error: {err}") from err
 
     def _build_headers(self) -> dict[str, str]:
         return {
@@ -91,7 +95,7 @@ class AnthropicProvider(BaseLLMProvider):
         with self._resilient_urlopen(request, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         if body.get("type") == "error":
-            raise RuntimeError(body["error"]["message"])
+            raise RuntimeError(format_api_error(self.provider_display_name, body=body))
 
         content_blocks = body.get("content", [])
         text = ""
@@ -173,7 +177,7 @@ class AnthropicProvider(BaseLLMProvider):
                 elif e_type == "message_delta":
                     finish_reason = event.get("delta", {}).get("stop_reason", "end_turn")
                 elif e_type == "error":
-                    raise RuntimeError(event.get("error", {}).get("message", "Unknown error"))
+                    raise RuntimeError(format_api_error(self.provider_display_name, body=event))
 
         # Finalise tool calls
         final_tool_calls = []
@@ -192,7 +196,7 @@ class AnthropicProvider(BaseLLMProvider):
         )
 
     @staticmethod
-    def _to_anthropic_tool(t: ToolDefinition) -> dict:
+    def _to_anthropic_tool(t: ToolDefinition) -> dict[str, Any]:
         return {
             "name": t.name,
             "description": t.description,

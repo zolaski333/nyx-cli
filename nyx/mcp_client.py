@@ -42,7 +42,7 @@ DEFAULT_MAX_RESPONSE_CHARS = 20000
 DEFAULT_MCP_DOCKER_IMAGE = "python:3.11-slim-buster"
 
 
-def _write_line(stream, data: dict[str, Any]) -> None:
+def _write_line(stream: Any, data: dict[str, Any]) -> None:
     line = json.dumps(data, ensure_ascii=False) + "\n"
     stream.write(line.encode("utf-8"))
     stream.flush()
@@ -143,7 +143,7 @@ class MCPSession:
     def __init__(self, name: str, config: dict[str, Any]) -> None:
         self.name = name
         self.config = config
-        self._proc: subprocess.Popen | Any | None = None
+        self._proc: subprocess.Popen[bytes] | Any | None = None
         self._req_id = 0
         self.status = "disconnected"
         self.last_error: str | None = None
@@ -243,7 +243,30 @@ class MCPSession:
         if sandbox_enabled and use_docker:
             return self._build_docker_invocation([str(cmd), *args], merged_env, local_cwd, sandbox_cfg)
 
-        return [str(cmd), *args], merged_env, local_cwd
+        resolved_cmd = self._resolve_command(str(cmd), merged_env)
+        return [resolved_cmd, *args], merged_env, local_cwd
+
+    def _resolve_command(self, cmd: str, env: dict[str, str]) -> str:
+        """Resolve command shims like npx.cmd on Windows without shell=True."""
+        if os.name != "nt":
+            return cmd
+        if any(sep in cmd for sep in (os.sep, os.altsep) if sep):
+            return cmd
+
+        path = env.get("PATH") or os.environ.get("PATH")
+        found = shutil.which(cmd, path=path)
+        if found:
+            return found
+
+        base, ext = os.path.splitext(cmd)
+        if ext:
+            raise RuntimeError(f"MCP server '{self.name}': command not found: {cmd}")
+
+        for suffix in (".cmd", ".bat", ".exe", ".ps1"):
+            found = shutil.which(base + suffix, path=path)
+            if found:
+                return found
+        raise RuntimeError(f"MCP server '{self.name}': command not found: {cmd}")
 
     def _resolve_cwd(self, cwd: Any) -> str | None:
         if not cwd:
@@ -512,9 +535,10 @@ class MCPSession:
         if not proc:
             return
         try:
-            if getattr(proc, "stdin", None):
+            stdin = getattr(proc, "stdin", None)
+            if stdin is not None:
                 try:
-                    proc.stdin.close()
+                    stdin.close()
                 except Exception:
                     pass
             poll = getattr(proc, "poll", None)
@@ -528,7 +552,7 @@ class MCPSession:
         except Exception:
             pass
 
-    def _terminate_process_tree(self, proc: subprocess.Popen | Any) -> None:
+    def _terminate_process_tree(self, proc: subprocess.Popen[bytes] | Any) -> None:
         if os.name == "nt":
             pid = getattr(proc, "pid", None)
             if pid:
@@ -540,11 +564,11 @@ class MCPSession:
                 )
                 return
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(proc.pid, signal.SIGTERM)  # type: ignore[attr-defined]
         except Exception:
             proc.terminate()
 
-    def _kill_process_tree(self, proc: subprocess.Popen | Any) -> None:
+    def _kill_process_tree(self, proc: subprocess.Popen[bytes] | Any) -> None:
         if os.name == "nt":
             pid = getattr(proc, "pid", None)
             if pid:
@@ -556,7 +580,7 @@ class MCPSession:
                 )
                 return
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)  # type: ignore[attr-defined]
         except Exception:
             proc.kill()
 

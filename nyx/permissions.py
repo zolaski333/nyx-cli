@@ -18,9 +18,11 @@ import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+PermissionConfig = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +108,7 @@ class PermissionCategory:
 class PermissionManager:
     """Central permission manager for all operations."""
 
-    def __init__(self, config: dict | None = None):
+    def __init__(self, config: PermissionConfig | None = None):
         self.categories: dict[str, PermissionCategory] = {}
         self._approval_callback: Callable[[str, str, str], tuple[bool, str]] | None = None
         self._load_defaults()
@@ -245,7 +247,7 @@ class PermissionManager:
     # Config loading
     # ------------------------------------------------------------------
 
-    def _load_config(self, config: dict) -> None:
+    def _load_config(self, config: PermissionConfig) -> None:
         """Load permission rules from configuration dict."""
         for cat_name, cat_config in config.items():
             category = self.categories.get(cat_name)
@@ -347,9 +349,9 @@ class PermissionManager:
             return self.request_approval("filesystem", "File read operation", path) + (level,)
         return True, "", level
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize permissions to a dict for config/display."""
-        result = {}
+        result: dict[str, Any] = {}
         for name, cat in self.categories.items():
             result[name] = {
                 "default": cat.default_level.value,

@@ -22,7 +22,7 @@ import urllib.request
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from nyx.providers.base import BaseLLMProvider
 
@@ -32,6 +32,64 @@ if os.name == "nt":
     DEFAULT_MEMORY_DIR = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "nyx" / "memory"
 else:
     DEFAULT_MEMORY_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "nyx" / "memory"
+
+
+class _InterProcessFileLock:
+    """Small cross-platform exclusive file lock for the memory store."""
+
+    def __init__(self, path: Path, timeout_seconds: float = 30.0) -> None:
+        self.path = path
+        self.timeout_seconds = timeout_seconds
+        self._handle: BinaryIO | None = None
+
+    def __enter__(self) -> "_InterProcessFileLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        self._handle = handle
+        handle.seek(0)
+        deadline = time.monotonic() + self.timeout_seconds
+
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    return self
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        handle.close()
+                        self._handle = None
+                        raise TimeoutError(f"Timed out acquiring memory lock: {self.path}")
+                    time.sleep(0.05)
+
+        import fcntl
+
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    self._handle = None
+                    raise TimeoutError(f"Timed out acquiring memory lock: {self.path}")
+                time.sleep(0.05)
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if not self._handle:
+            return
+        self._handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+        self._handle.close()
+        self._handle = None
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +113,10 @@ def _get_embedding(text: str, provider: str, api_key: str) -> list[float] | None
         req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=8) as response:
             res = json.loads(response.read().decode("utf-8"))
-            return res["data"][0]["embedding"]
+            embedding = res["data"][0]["embedding"]
+            if isinstance(embedding, list) and all(isinstance(item, (int, float)) for item in embedding):
+                return [float(item) for item in embedding]
+            return None
     except Exception as e:
         logger.debug("Failed to get embedding: %s", e)
         return None
@@ -89,16 +150,16 @@ class BM25:
         self.corpus_size = len(corpus)
         self.avg_doc_len = sum(len(doc) for doc in corpus) / max(1, self.corpus_size)
         self.doc_lens = [len(doc) for doc in corpus]
-        self.df = {}
+        self.df: dict[str, int] = {}
         for doc in corpus:
             for term in set(doc):
                 self.df[term] = self.df.get(term, 0) + 1
-        self.idf = {}
+        self.idf: dict[str, float] = {}
         for term, freq in self.df.items():
             self.idf[term] = math.log((self.corpus_size - freq + 0.5) / (freq + 0.5) + 1.0)
-        self.doc_term_freqs = []
+        self.doc_term_freqs: list[dict[str, int]] = []
         for doc in corpus:
-            tf = {}
+            tf: dict[str, int] = {}
             for term in doc:
                 tf[term] = tf.get(term, 0) + 1
             self.doc_term_freqs.append(tf)
@@ -137,7 +198,7 @@ class ConversationEntry:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ConversationEntry":
+    def from_dict(cls, d: dict[str, Any]) -> "ConversationEntry":
         return cls(
             role=d["role"],
             content=d["content"],
@@ -172,7 +233,7 @@ class Conversation:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Conversation":
+    def from_dict(cls, d: dict[str, Any]) -> "Conversation":
         return cls(
             id=d["id"],
             title=d.get("title", "Untitled"),
@@ -231,9 +292,11 @@ class MemoryManager:
 
         # Buffered save mechanism
         self._save_lock = threading.Lock()
+        self._storage_lock_path = self._dir / ".memory.lock"
         self._save_timer: threading.Timer | None = None
         self._save_delay = 2.0  # Debounce delay in seconds
         self._dirty_conversations: set[str] = set()
+        self._deleted_conversations: set[str] = set()
         self._dirty_index = False
 
         # Load existing conversations index (lazy — only loads metadata)
@@ -255,34 +318,66 @@ class MemoryManager:
     def _index_path(self) -> Path:
         return self._dir / "index.json"
 
+    def _storage_lock(self) -> _InterProcessFileLock:
+        return _InterProcessFileLock(self._storage_lock_path)
+
+    def _read_json_file(self, path: Path, default: Any) -> Any:
+        if not path.exists():
+            return default
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _write_json_file(self, path: Path, data: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
     def _load_index(self) -> None:
         """Load the conversation index from disk (lazy — only metadata)."""
         idx = self._index_path()
-        if idx.exists():
-            try:
-                with idx.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
+        try:
+            with self._storage_lock():
+                if not idx.exists():
+                    return
+                data = self._read_json_file(idx, {})
                 conv_ids = data.get("conversations", [])
                 current = data.get("current", "")
                 # Only load the current conversation fully; others are lazy-loaded
                 if current and current in conv_ids:
-                    self._load_conversation(current)
+                    self._load_conversation_unlocked(current)
                 for cid in conv_ids:
                     if cid != current and cid not in self._conversations:
                         # Create a placeholder with just the ID
                         self._conversations[cid] = Conversation(id=cid)
                 if current and current in self._conversations:
                     self._current_id = current
-            except (json.JSONDecodeError, KeyError, OSError):
-                pass
+        except (json.JSONDecodeError, KeyError, OSError, TimeoutError):
+            pass
 
     def _load_conversation(self, conv_id: str) -> bool:
         """Fully load a single conversation from disk."""
+        try:
+            with self._storage_lock():
+                return self._load_conversation_unlocked(conv_id)
+        except TimeoutError:
+            return False
+
+    def _load_conversation_unlocked(self, conv_id: str) -> bool:
         conv_path = self._conv_path(conv_id)
         if conv_path.exists():
             try:
-                with conv_path.open("r", encoding="utf-8") as f:
-                    self._conversations[conv_id] = Conversation.from_dict(json.load(f))
+                self._conversations[conv_id] = Conversation.from_dict(self._read_json_file(conv_path, {}))
                 return True
             except (json.JSONDecodeError, KeyError, OSError):
                 pass
@@ -290,13 +385,22 @@ class MemoryManager:
 
     def _save_index(self) -> None:
         """Save the conversation index to disk."""
+        try:
+            existing = self._read_json_file(self._index_path(), {})
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+        existing_ids = existing.get("conversations", [])
+        merged_ids = list(dict.fromkeys([
+            *(cid for cid in existing_ids if isinstance(cid, str) and cid not in self._deleted_conversations),
+            *self._conversations.keys(),
+        ]))
         data = {
-            "conversations": list(self._conversations.keys()),
+            "conversations": merged_ids,
             "current": self._current_id,
             "updated_at": time.time(),
         }
-        with self._index_path().open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        self._write_json_file(self._index_path(), data)
+        self._deleted_conversations.clear()
 
     def _conv_path(self, conv_id: str) -> Path:
         return self._dir / f"{conv_id}.json"
@@ -332,20 +436,22 @@ class MemoryManager:
             self._dirty_index = False
             self._save_timer = None
 
-        # Write dirty conversations
-        for cid in dirty_convs:
-            conv = self._conversations.get(cid)
-            if conv and conv.entries:  # Only save non-empty conversations
-                path = self._conv_path(cid)
-                try:
-                    with path.open("w", encoding="utf-8") as f:
-                        json.dump(conv.to_dict(), f, ensure_ascii=False, indent=2)
-                except OSError:
-                    pass
+        try:
+            with self._storage_lock():
+                # Write dirty conversations
+                for cid in dirty_convs:
+                    conv = self._conversations.get(cid)
+                    if conv and conv.entries:  # Only save non-empty conversations
+                        try:
+                            self._write_json_file(self._conv_path(cid), conv.to_dict())
+                        except OSError:
+                            pass
 
-        # Write index if dirty
-        if dirty_idx:
-            self._save_index()
+                # Write index if dirty
+                if dirty_idx:
+                    self._save_index()
+        except TimeoutError:
+            logger.warning("Timed out acquiring memory lock while flushing saves.")
 
     # ------------------------------------------------------------------
     # Conversation management
@@ -415,9 +521,14 @@ class MemoryManager:
         if conv_id not in self._conversations:
             return False
         del self._conversations[conv_id]
+        self._deleted_conversations.add(conv_id)
         conv_path = self._conv_path(conv_id)
-        if conv_path.exists():
-            conv_path.unlink()
+        try:
+            with self._storage_lock():
+                if conv_path.exists():
+                    conv_path.unlink()
+        except (OSError, TimeoutError):
+            pass
         if self._current_id == conv_id:
             self._current_id = next(iter(self._conversations.keys()), "")
             if not self._current_id:
@@ -570,22 +681,33 @@ class MemoryManager:
 
     def _save_note(self, content: str, tags: str = "") -> None:
         """Save a note to the dedicated notes store (persistent across conversations)."""
-        notes = self._load_notes()
-        notes.append({
-            "content": content,
-            "tags": tags,
-            "timestamp": time.time(),
-        })
-        with self._notes_path().open("w", encoding="utf-8") as f:
-            json.dump(notes, f, ensure_ascii=False, indent=2)
+        try:
+            with self._storage_lock():
+                notes = self._load_notes_unlocked()
+                notes.append({
+                    "content": content,
+                    "tags": tags,
+                    "timestamp": time.time(),
+                })
+                self._write_json_file(self._notes_path(), notes)
+        except TimeoutError:
+            logger.warning("Timed out acquiring memory lock while saving note.")
 
     def _load_notes(self) -> list[dict[str, Any]]:
         """Load saved notes from the notes store."""
+        try:
+            with self._storage_lock():
+                return self._load_notes_unlocked()
+        except TimeoutError:
+            return []
+
+    def _load_notes_unlocked(self) -> list[dict[str, Any]]:
         path = self._notes_path()
         if path.exists():
             try:
-                with path.open("r", encoding="utf-8") as f:
-                    return json.load(f)
+                notes = self._read_json_file(path, [])
+                if isinstance(notes, list):
+                    return [note for note in notes if isinstance(note, dict)]
             except (json.JSONDecodeError, OSError):
                 pass
         return []
@@ -617,18 +739,25 @@ class MemoryManager:
 
     def _load_embeddings_cache(self) -> None:
         """Load cached embeddings from disk."""
-        if self._embeddings_cache_path.exists():
-            try:
-                with self._embeddings_cache_path.open("r", encoding="utf-8") as f:
-                    self._embeddings_cache = json.load(f)
-            except Exception:
-                self._embeddings_cache = {}
+        try:
+            with self._storage_lock():
+                if self._embeddings_cache_path.exists():
+                    self._embeddings_cache = self._read_json_file(self._embeddings_cache_path, {})
+        except Exception:
+            self._embeddings_cache = {}
 
     def _save_embeddings_cache(self) -> None:
         """Save cached embeddings to disk."""
         try:
-            with self._embeddings_cache_path.open("w", encoding="utf-8") as f:
-                json.dump(self._embeddings_cache, f, ensure_ascii=False, indent=2)
+            with self._storage_lock():
+                try:
+                    existing = self._read_json_file(self._embeddings_cache_path, {})
+                except (json.JSONDecodeError, OSError):
+                    existing = {}
+                if isinstance(existing, dict):
+                    existing.update(self._embeddings_cache)
+                    self._embeddings_cache = existing
+                self._write_json_file(self._embeddings_cache_path, self._embeddings_cache)
         except Exception:
             pass
 
@@ -680,6 +809,8 @@ class MemoryManager:
 
         # 2. Try to get embedding for query
         query_emb = None
+        embedding_provider: str | None = None
+        embedding_api_key: str | None = None
         provider = None
         api_key = None
         if config:
@@ -689,12 +820,16 @@ class MemoryManager:
             provider = getattr(self._provider, "provider", None) or getattr(self._provider, "name", None)
             api_key = getattr(self._provider, "api_key", None)
 
-        if provider and api_key:
+        if isinstance(provider, str) and isinstance(api_key, str):
+            embedding_provider = provider
+            embedding_api_key = api_key
             query_emb = _get_embedding(query, provider, api_key)
 
         # 3. Calculate scores
         results = []
         if query_emb:
+            assert embedding_provider is not None
+            assert embedding_api_key is not None
             logger.debug("Performing semantic similarity search for query: '%s'", query)
             dirty_cache = False
             for doc in docs:
@@ -702,7 +837,7 @@ class MemoryManager:
                 chk = _text_checksum(txt)
                 doc_emb = self._embeddings_cache.get(chk)
                 if not doc_emb:
-                    doc_emb = _get_embedding(txt, provider, api_key)
+                    doc_emb = _get_embedding(txt, embedding_provider, embedding_api_key)
                     if doc_emb:
                         self._embeddings_cache[chk] = doc_emb
                         dirty_cache = True

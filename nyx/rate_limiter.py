@@ -1,10 +1,10 @@
 """
-Nyx — Rate limiter, retry with exponential backoff, and robust timeout.
+Nyx — Rate limiter, retry with exponential backoff, and timeout policy.
 
 Provides:
 - Token-bucket rate limiter for API calls
 - Exponential backoff with jitter for retries
-- Robust timeout context manager for HTTP calls
+- Compatibility timeout context; hard timeouts belong to transports
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import logging
 import random
 import threading
 import time
+import urllib.error
 from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ def exponential_backoff(
     delay = min(base_delay * (2 ** attempt), max_delay)
     if jitter:
         delay *= random.uniform(0.5, 1.5)
-    return delay
+    return float(delay)
 
 
 def retry_with_backoff(
@@ -148,6 +149,8 @@ def retry_with_backoff(
         try:
             return fn(**kwargs)
         except retryable_exceptions as e:
+            if not _is_retryable_exception(e, retryable_exceptions):
+                raise
             last_exc = e
             if attempt < max_retries:
                 delay = exponential_backoff(attempt, base_delay, max_delay)
@@ -171,6 +174,17 @@ def retry_with_backoff(
     raise RuntimeError("Unexpected: retry loop ended without result or exception")
 
 
+def _is_retryable_exception(
+    exc: Exception,
+    retryable_exceptions: tuple[type[Exception], ...],
+) -> bool:
+    if not isinstance(exc, retryable_exceptions):
+        return False
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 429 or exc.code >= 500
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Robust timeout context manager
 # ---------------------------------------------------------------------------
@@ -181,63 +195,23 @@ class TimeoutError(Exception):
     pass
 
 
-class TimeoutInterrupt(BaseException):
-    """Internal exception raised to interrupt a background thread on timeout."""
-    pass
-
-
-def _raise_in_thread(thread_id: int, ex: type[BaseException]) -> None:
-    """Raise an exception asynchronously in a running thread by its ID."""
-    try:
-        import ctypes
-        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_long(thread_id),
-            ctypes.pyapi.PyObj_FromPtr(id(ex))
-        )
-        if res > 1:
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), None)
-    except Exception as e:
-        logger.debug("Failed to raise async exception in thread: %s", e)
-
-
 class timeout:
-    """Context manager that raises TimeoutError if the block takes too long.
+    """Compatibility no-op context manager.
 
-    Uses a background thread with a daemon timer. Note: this only works
-    for Python code that respects the timeout flag — it does NOT kill
-    C extensions or system calls. For those, use signal-based timeouts
-    or subprocess timeouts.
+    Hard timeout enforcement belongs to native transports or subprocess APIs.
+    This context manager intentionally does not claim to interrupt blocking
+    calls from another thread.
     """
 
     def __init__(self, seconds: float, message: str = "Operation timed out") -> None:
         self._seconds = seconds
         self._message = message
-        self._timed_out = False
-        self._timer: threading.Timer | None = None
-        self._thread_id = threading.current_thread().ident or 0
 
     def __enter__(self) -> "timeout":
-        self._timer = threading.Timer(self._seconds, self._trigger)
-        self._timer.daemon = True
-        self._timer.start()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool | None:
-        if self._timer:
-            self._timer.cancel()
-            self._timer = None
-        if self._timed_out:
-            # Raise TimeoutError, suppressing internal interrupts
-            raise TimeoutError(self._message)
         return None
-
-    def _trigger(self) -> None:
-        self._timed_out = True
-        if self._thread_id == threading.main_thread().ident:
-            import _thread
-            _thread.interrupt_main()
-        else:
-            _raise_in_thread(self._thread_id, TimeoutInterrupt)
 
 
 # ---------------------------------------------------------------------------
@@ -260,14 +234,12 @@ class ResilientClient:
         max_retries: int = 3,
         base_delay: float = 1.0,
         max_delay: float = 60.0,
-        default_timeout: float = 120.0,
         retryable_exceptions: tuple[type[Exception], ...] | None = None,
     ) -> None:
         self._rate_limiter = RateLimiter(rate=rate, burst=burst)
         self._max_retries = max_retries
         self._base_delay = base_delay
         self._max_delay = max_delay
-        self._default_timeout = default_timeout
         self._retryable_exceptions = retryable_exceptions or (
             ConnectionError,
             TimeoutError,
@@ -277,26 +249,24 @@ class ResilientClient:
     def execute(
         self,
         fn: Callable[..., T],
-        timeout_seconds: float | None = None,
         **kwargs: Any,
     ) -> T:
-        """Execute *fn* with rate limiting, retry, and timeout."""
+        """Execute *fn* with rate limiting and retry.
+
+        Hard timeout enforcement belongs to the network transport. Pass native
+        timeout options to the transport callable itself.
+        """
         # 1. Rate limit
         self._rate_limiter.acquire()
 
-        # 2. Execute with timeout and retry
-        timeout_seconds = timeout_seconds or self._default_timeout
-
-        def _wrapped() -> T:
-            with timeout(seconds=timeout_seconds):
-                return fn(**kwargs)
-
+        # 2. Execute with retry. Native timeout kwargs, if any, are forwarded to fn.
         return retry_with_backoff(
-            _wrapped,
+            fn,
             max_retries=self._max_retries,
             base_delay=self._base_delay,
             max_delay=self._max_delay,
             retryable_exceptions=self._retryable_exceptions,
+            **kwargs,
         )
 
     @property

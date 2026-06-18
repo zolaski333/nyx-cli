@@ -5,7 +5,6 @@ import json
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any
-from urllib.parse import urlparse
 
 import pytest
 
@@ -387,6 +386,7 @@ class TestOpenRouterProviderMock:
         """Should retry on 429 rate limit."""
         base_url = f"http://127.0.0.1:{mock_openai_server}/v1/chat/completions"
         config = _make_config("openrouter", base_url)
+        config.rate_limiting_enabled = True
         provider = get_provider(config)
 
         # Fail for the first request only with retry_after_seconds so the provider retries

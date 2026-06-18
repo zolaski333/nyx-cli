@@ -5,9 +5,7 @@ import json
 import os
 import tempfile
 import time
-from pathlib import Path
 
-import pytest
 
 from nyx.json_logger import JSONLogger, estimate_cost, JSONLogEntry
 

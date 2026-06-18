@@ -8,13 +8,12 @@ Useful for parallel research, code generation, or complex subtasks.
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, TYPE_CHECKING
 
 from nyx.config import Config
-from nyx.providers.base import BaseLLMProvider, ToolCall
+from nyx.providers.base import BaseLLMProvider, ToolCall, ToolDefinition
 from nyx.providers import get_provider
 
 if TYPE_CHECKING:
@@ -79,9 +78,11 @@ class Subagent:
         config: Config | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.5,
-        tools: list | None = None,
+        tools: list[ToolDefinition] | None = None,
         tool_executor: Callable[[ToolCall], str] | None = None,
         context: ToolContext | None = None,
+        on_command_approval: Callable[[str], tuple[bool, str]] | None = None,
+        on_file_approval: Callable[[str, str, str], tuple[bool, str]] | None = None,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt or (
@@ -95,6 +96,8 @@ class Subagent:
         self._tools = tools  # Controlled tool subset (None = no tools)
         self._tool_executor = tool_executor
         self.context = context
+        self._on_command_approval = on_command_approval
+        self._on_file_approval = on_file_approval
 
     @property
     def can_run_isolated(self) -> bool:
@@ -105,7 +108,7 @@ class Subagent:
         self,
         task: str,
         context: str = "",
-        tools: list | None = None,
+        tools: list[ToolDefinition] | None = None,
         max_steps: int | None = None,
         timeout_seconds: float | None = None,
     ) -> SubagentResult:
@@ -184,7 +187,7 @@ class Subagent:
                 
                 # Append assistant response
                 content_str = response.content or ""
-                assistant_msg = {
+                assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": content_str,
                 }
@@ -307,7 +310,7 @@ class Subagent:
                 duration_seconds=time.monotonic() - started,
             )
 
-    def execute_task(self, task: SubagentTask, tools: list | None = None) -> SubagentResult:
+    def execute_task(self, task: SubagentTask, tools: list[ToolDefinition] | None = None) -> SubagentResult:
         """Run a structured task contract."""
         if task.system_prompt:
             self.system_prompt = task.system_prompt
@@ -321,7 +324,7 @@ class Subagent:
             timeout_seconds=task.timeout_seconds,
         )
 
-    def _execute_tool_call(self, tc, tools: list) -> str:
+    def _execute_tool_call(self, tc: ToolCall, tools: list[ToolDefinition]) -> str:
         """Execute a single tool call for the subagent.
 
         Enforces all sandbox and permission checks by delegating to the central executor.
@@ -351,6 +354,16 @@ class Subagent:
         patch_tool = PatchTool(project_dir=config.project_dir if config else None)
         memory = MemoryManager(provider=self._provider)
 
+        def _approval_callback(category: str, description: str, target: str) -> tuple[bool, str]:
+            if category == "shell" and self._on_command_approval:
+                return self._on_command_approval(target)
+            if category == "filesystem" and self._on_file_approval:
+                return self._on_file_approval(target, description, "")
+            return False, "No approval mechanism configured."
+
+        permissions.set_approval_callback(_approval_callback)
+        patch_tool.set_approval_callback(self._on_file_approval)
+
         context = ToolContext(
             config=config,
             sandbox=sandbox,
@@ -358,6 +371,8 @@ class Subagent:
             audit=audit,
             patch_tool=patch_tool,
             memory=memory,
+            on_command_approval=self._on_command_approval,
+            on_file_approval=self._on_file_approval,
         )
 
         return execute_tool(tc, context)
@@ -378,7 +393,7 @@ class SubagentManager:
         self.default_timeout_seconds = default_timeout_seconds
         self._subagents: dict[str, Subagent] = {}
         self._results: dict[str, list[SubagentResult]] = {}
-        self._default_tools: list | None = None  # Controlled tool subset
+        self._default_tools: list[ToolDefinition] | None = None  # Controlled tool subset
         self._tool_executor: Callable[[ToolCall], str] | None = None
         self._progress_callback: Callable[[str, int, int], None] | None = None
         self._context: ToolContext | None = None
@@ -387,7 +402,7 @@ class SubagentManager:
         """Set a callback for progress updates: (label, current, total)."""
         self._progress_callback = callback
 
-    def set_default_tools(self, tools: list | None) -> None:
+    def set_default_tools(self, tools: list[ToolDefinition] | None) -> None:
         """Set the default tool subset for all spawned subagents."""
         self._default_tools = tools
         for agent in self._subagents.values():
@@ -411,7 +426,7 @@ class SubagentManager:
         system_prompt: str = "",
         max_tokens: int = 2048,
         temperature: float = 0.5,
-        tools: list | None = None,
+        tools: list[ToolDefinition] | None = None,
     ) -> Subagent:
         """Create a new subagent by name.
 
@@ -469,6 +484,8 @@ class SubagentManager:
                 config=self._config,
                 tools=agent._tools,
                 timeout_seconds=timeout_seconds,
+                on_command_approval=self._context.on_command_approval if self._context else None,
+                on_file_approval=self._context.on_file_approval if self._context else None,
             )
         else:
             result = agent.execute_task(task, tools=agent._tools)

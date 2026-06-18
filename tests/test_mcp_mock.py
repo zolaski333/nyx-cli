@@ -1,11 +1,8 @@
 """Tests for MCP client with a dummy JSON-RPC server over stdio."""
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
-import threading
-from typing import Any
 
 import pytest
 
@@ -370,6 +367,22 @@ class TestMCPSession:
         })
         with pytest.raises(RuntimeError):
             session._build_process_invocation()
+
+    def test_windows_command_shim_is_resolved(self, monkeypatch):
+        """Windows MCP commands like npx should resolve to command shims."""
+        monkeypatch.setattr("nyx.mcp_client.os.name", "nt")
+        monkeypatch.setattr(
+            "nyx.mcp_client.shutil.which",
+            lambda name, path=None: "C:\\node\\npx.cmd" if name == "npx.cmd" else None,
+        )
+        session = MCPSession("node", {
+            "command": "npx",
+            "args": ["-y", "some-server"],
+        })
+
+        argv, _env, _cwd = session._build_process_invocation()
+
+        assert argv == ["C:\\node\\npx.cmd", "-y", "some-server"]
 
     def test_docker_sandbox_invocation_is_built_without_secret_env(self, monkeypatch, tmp_path):
         """Docker sandbox mode should build a stdio-friendly isolated invocation."""

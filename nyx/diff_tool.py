@@ -25,7 +25,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -1202,18 +1202,21 @@ class PatchTool:
                 )
 
         # Apply the patch to produce proposed content
+        proposed: str
         if patch_info.change_type == ChangeType.CREATE:
             proposed = diff_text  # Full content for new files
         elif patch_info.change_type == ChangeType.DELETE:
             proposed = ""
         elif patch_format == "search_replace":
-            proposed = _apply_search_replace_to_content(original, diff_text)
-            if proposed is None:
+            search_replace_content = _apply_search_replace_to_content(original, diff_text)
+            if search_replace_content is None:
                 return False, f"Failed to apply SEARCH/REPLACE patch to {path}: SEARCH text not found in file"
+            proposed = search_replace_content
         else:
-            proposed = _apply_unified_diff_to_content(original, diff_text)
-            if proposed is None:
+            unified_content = _apply_unified_diff_to_content(original, diff_text)
+            if unified_content is None:
                 return False, f"Failed to apply patch to {path}: could not reconstruct content"
+            proposed = unified_content
 
         patch_info.proposed_content = proposed
 
@@ -1402,8 +1405,8 @@ def _apply_unified_diff_to_content(original: str, diff_text: str) -> str | None:
     diff_lines = diff_text.splitlines()
 
     # 1. Parse diff into hunks
-    hunks = []
-    current_hunk = None
+    hunks: list[dict[str, Any]] = []
+    current_hunk: dict[str, Any] | None = None
 
     for line in diff_lines:
         m = _HUNK_HEADER_RE.match(line)
@@ -1411,10 +1414,7 @@ def _apply_unified_diff_to_content(original: str, diff_text: str) -> str | None:
             if current_hunk:
                 hunks.append(current_hunk)
             old_start = int(m.group(1))
-            current_hunk = {
-                "old_start": old_start,
-                "lines": []
-            }
+            current_hunk = {"old_start": old_start, "lines": []}
         elif current_hunk is not None:
             # Skip diff file headers, git comments, etc. Only parse actual hunk body.
             if line.startswith((" ", "-", "+")):
@@ -1429,10 +1429,10 @@ def _apply_unified_diff_to_content(original: str, diff_text: str) -> str | None:
     cumulative_offset = 0
 
     for hunk in hunks:
-        hunk_lines = hunk["lines"]
-        old_start = hunk["old_start"]
+        hunk_lines: list[str] = hunk["lines"]
+        hunk_old_start: int = hunk["old_start"]
 
-        expected_idx = (old_start - 1) + cumulative_offset
+        expected_idx = (hunk_old_start - 1) + cumulative_offset
 
         # Split hunk lines into search (original context/deletions) and replace (context/additions)
         search_block = []
@@ -1454,7 +1454,7 @@ def _apply_unified_diff_to_content(original: str, diff_text: str) -> str | None:
             if not search_block:
                 match_idx = max(0, min(expected_idx, len(original_lines)))
             else:
-                logger.warning("Fuzzy matching failed for hunk at expected line %d", old_start)
+                logger.warning("Fuzzy matching failed for hunk at expected line %d", hunk_old_start)
                 return None
 
         # Replace lines in original_lines

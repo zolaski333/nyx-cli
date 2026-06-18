@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from queue import Queue
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -46,9 +47,6 @@ class AuditEntry:
 # Audit trail
 # ---------------------------------------------------------------------------
 
-
-from queue import Queue
-
 class AuditTrail:
     """Thread-safe audit trail that writes structured JSON-lines to a file."""
 
@@ -58,7 +56,7 @@ class AuditTrail:
         agent_id: str = "nyx",
         max_file_size_mb: int = 50,
         enabled: bool = True,
-    ):
+    ) -> None:
         self._agent_id = agent_id
         self._enabled = enabled
         self._max_file_size = max_file_size_mb * 1024 * 1024
@@ -66,7 +64,7 @@ class AuditTrail:
         self._file: Any = None  # Type: IO | None
         self._file_path: Path | None = None
         self._entry_count = 0
-        self._queue: Queue = Queue()
+        self._queue: Queue[AuditEntry] = Queue()
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 

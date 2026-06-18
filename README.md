@@ -21,6 +21,8 @@ Nyx is an **experimental agentic coding CLI** that keeps the runtime small and h
 
 Nyx is not yet a drop-in replacement for mature coding agents. Today it is best suited for trusted local projects, experimentation, provider flexibility, and workflows where you want to inspect and extend the agent internals.
 
+Distribution note: the PyPI project name `nyx` is already used by another project. If this CLI is published to PyPI, install it as `nyx-cli`; the import package and console command remain `nyx`.
+
 Current strengths:
 
 - Small Python codebase with few runtime assumptions.
@@ -63,6 +65,9 @@ export OPENROUTER_API_KEY="sk-or-..."
 # Installation globale (recommandée)
 pip install -e ".[tui]"
 
+# Ou depuis Git, sans cloner durablement le dépôt
+pipx install "nyx-cli[tui] @ git+https://github.com/zolaski333/nyx-cli.git"
+
 # Lancer depuis n'importe quel dossier
 cd /chemin/vers/mon/projet
 nyx
@@ -90,6 +95,9 @@ $env:OPENROUTER_API_KEY = "sk-or-..."
 
 # Installation globale (recommandée)
 pip install -e ".[tui]"
+
+# Ou depuis Git, sans cloner durablement le dépôt
+pipx install "nyx-cli[tui] @ git+https://github.com/zolaski333/nyx-cli.git"
 
 # Lancer depuis n'importe quel dossier
 cd C:\chemin\vers\mon\projet
@@ -457,6 +465,7 @@ Priority chain: **Environment variables > config.json > Defaults**
 - File reads and writes are restricted to the project sandbox unless an explicit allow path is configured.
 - File modifications are guarded by sandbox checks and approval prompts, but the project is still experimental.
 - Simple shell commands run without a shell where practical. Composite commands and shell-control operators such as `&&`, `|`, redirection and command substitution require approval.
+- Dangerous-command keyword checks are only advisory UX guardrails. They are not a security boundary and can be bypassed with shell syntax, wrapper scripts, aliases, or platform-specific behavior. Use Docker/Podman sandbox isolation for real containment.
 - MCP servers receive a minimal environment by default; secrets are not inherited automatically.
 - MCP servers are local processes and can perform whatever their implementation allows. Nyx adds timeouts, output limits, restart handling, process-tree termination, and optional Docker/Podman sandbox execution around them, but you should still only configure servers you trust.
 - Python skills are discovered without import and execute in a timeout-bounded worker process by default, but they still run as trusted local code under the same OS user.
@@ -465,10 +474,16 @@ Priority chain: **Environment variables > config.json > Defaults**
 Known limits:
 
 - Nyx is an experimental agentic coding CLI, not a production-ready security boundary.
-- Shell command parsing is conservative but not a substitute for OS sandboxing.
+- Shell command parsing and blacklist checks are conservative but not a substitute for OS sandboxing.
 - Rollback/history files are best-effort developer aids, not backups.
 - Memory summaries can omit details; keep important project state in files and tests.
 - Subagents have structured results, tool capability checks, and default process isolation. Custom in-memory providers or custom tool executors may still run in-process, and isolated workers still use the same filesystem permissions configured for Nyx.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and supported security expectations.
+
+### Release readiness
+
+Before sharing a build widely, follow [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md). In short: run the full tests, run `ruff`, inspect `git status`, scan for accidental secrets, test a fresh install, and start with a beta GitHub release before PyPI. Strict `mypy` is still tracked as follow-up typing debt.
 
 ---
 

@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import json
-import time
 import urllib.error
 import urllib.request
 from typing import Any, Callable
 
-from .base import BaseLLMProvider, LLMResponse, ToolCall, ToolDefinition
+from .base import BaseLLMProvider, LLMResponse, ToolCall, ToolDefinition, format_api_error
 
 
 class OpenRouterProvider(BaseLLMProvider):
     """Provider for OpenRouter (and any OpenAI-compatible endpoint)."""
+
+    provider_display_name = "OpenRouter"
 
     def chat(
         self,
@@ -39,23 +40,22 @@ class OpenRouterProvider(BaseLLMProvider):
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-        for attempt in range(2):
-            try:
-                if stream:
-                    return self._stream_response(request, timeout, on_token)
-                return self._non_stream_response(request, timeout)
-            except urllib.error.HTTPError as err:
-                error_body = err.read().decode("utf-8", errors="replace")
-                if err.code == 429 and attempt == 0:
-                    retry_after = self._extract_retry_after(error_body)
-                    if retry_after:
-                        print(f"\n[Rate limit] retry in {retry_after}s...")
-                        time.sleep(retry_after)
-                        continue
-                raise RuntimeError(error_body.strip() or f"HTTP {err.code}: {err.reason}") from err
-            except urllib.error.URLError as err:
-                raise RuntimeError(f"Network error: {err}") from err
-        raise RuntimeError("Still rate limited after retry.")
+        try:
+            if stream:
+                return self._stream_response(request, timeout, on_token)
+            return self._non_stream_response(request, timeout)
+        except urllib.error.HTTPError as err:
+            error_body = err.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                format_api_error(
+                    self.provider_display_name,
+                    status=err.code,
+                    reason=err.reason,
+                    body=error_body,
+                )
+            ) from err
+        except urllib.error.URLError as err:
+            raise RuntimeError(f"Network error: {err}") from err
 
     def _build_headers(self) -> dict[str, str]:
         api_key = self.config.get_api_key()
@@ -73,7 +73,7 @@ class OpenRouterProvider(BaseLLMProvider):
         with self._resilient_urlopen(request, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         if "error" in body:
-            raise RuntimeError(json.dumps(body["error"], ensure_ascii=False, indent=2))
+            raise RuntimeError(format_api_error(self.provider_display_name, body=body))
         choice = body["choices"][0]
         msg = choice["message"]
         tool_calls = []
@@ -113,6 +113,8 @@ class OpenRouterProvider(BaseLLMProvider):
                     chunk = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+                if "error" in chunk:
+                    raise RuntimeError(format_api_error(self.provider_display_name, body=chunk))
 
                 choices = chunk.get("choices", [{}])
                 if not choices:
@@ -172,7 +174,7 @@ class OpenRouterProvider(BaseLLMProvider):
         )
 
     @staticmethod
-    def _to_openai_tool(t: ToolDefinition) -> dict:
+    def _to_openai_tool(t: ToolDefinition) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {

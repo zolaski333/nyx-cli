@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import tempfile
-from pathlib import Path
 
 from nyx.agent import Agent, AgentContext
 from nyx.config import Config
 from nyx.providers.base import ToolCall
 from nyx.diff_tool import _apply_search_replace_to_content
-from nyx.subagent import Subagent
 
 
 class TestFuzzyDiff:

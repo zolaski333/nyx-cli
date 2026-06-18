@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+from types import ModuleType
 import multiprocessing as mp
 import queue
 import sys
@@ -24,7 +25,7 @@ def _payload_to_result(payload: dict[str, Any]) -> SkillResult:
     )
 
 
-def _import_skill_module(skill: Skill):
+def _import_skill_module(skill: Skill) -> ModuleType:
     path = Path(skill.file_path).resolve()
     module_name = f"_nyx_skill_{skill.name}_{abs(hash(str(path)))}"
     search_root = path.parent.parent if path.name == "__init__.py" else path.parent
@@ -86,7 +87,7 @@ def run_skill_in_current_process(skill: Skill, arguments: dict[str, Any]) -> Ski
         )
 
 
-def _worker_entry(result_queue: mp.Queue, skill: Skill, arguments: dict[str, Any]) -> None:
+def _worker_entry(result_queue: mp.Queue[dict[str, Any]], skill: Skill, arguments: dict[str, Any]) -> None:
     result = run_skill_in_current_process(skill, arguments)
     result_queue.put(result.to_dict())
 
@@ -100,7 +101,7 @@ def run_skill_in_process(
     """Execute a skill in a child process with a hard timeout."""
     started = time.monotonic()
     ctx = mp.get_context("spawn")
-    result_queue: mp.Queue = ctx.Queue(maxsize=1)
+    result_queue: mp.Queue[dict[str, Any]] = ctx.Queue(maxsize=1)
     proc = ctx.Process(
         target=_worker_entry,
         args=(result_queue, skill, arguments),

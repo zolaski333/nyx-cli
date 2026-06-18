@@ -275,6 +275,16 @@ class TestAgentSandbox:
             assert "python script.py" in wrapped
             assert tmpdir in wrapped
 
+    def test_sandbox_prepare_command_does_not_prefix_local_cd(self):
+        """Local command cwd is enforced by subprocess.run, not shell prefixing."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = Sandbox(project_root=tmpdir)
+
+            command = "cd /tmp && pwd"
+
+            assert sandbox.prepare_command(command) == command
+
     def test_shlex_quote(self):
         """Test shlex_quote handles escaping according to OS/platform."""
         from nyx.sandbox import shlex_quote
@@ -375,7 +385,6 @@ class TestAgentBuiltinTools:
     def test_apply_diff_modify_existing(self):
         """The apply_diff tool should modify an existing file."""
         import tempfile
-        import os
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = f"{tmpdir}/modify.txt"
             # Create initial file
@@ -445,6 +454,43 @@ class TestAgentBuiltinTools:
             })
             result = self.agent._execute_tool(tc)
             assert "traversal" in result.lower() or "SECURITY" in result or "denied" in result.lower()
+
+    def test_sandbox_deny_paths_block_read_and_write(self):
+        """Explicit sandbox deny_paths should block paths even inside the project."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            denied_dir = Path(tmpdir) / "private"
+            denied_dir.mkdir()
+            denied_file = denied_dir / "secret.txt"
+            denied_file.write_text("do-not-read", encoding="utf-8")
+
+            config = Config(
+                openrouter_api_key="sk-test",
+                project_dir=tmpdir,
+                sandbox_deny_paths=[str(denied_dir)],
+            )
+            agent = Agent(config=config)
+            agent.on_file_approval = lambda path, summary, diff: (True, "")
+            try:
+                read_result = agent._execute_tool(
+                    ToolCall(id="deny-read", name="read_file", arguments={"path": str(denied_file)})
+                )
+                assert "SECURITY" in read_result
+                assert "do-not-read" not in read_result
+
+                write_result = agent._execute_tool(
+                    ToolCall(
+                        id="deny-write",
+                        name="write_file",
+                        arguments={"path": str(denied_file), "content": "changed"},
+                    )
+                )
+                assert "SECURITY" in write_result
+                assert denied_file.read_text(encoding="utf-8") == "do-not-read"
+            finally:
+                agent.shutdown()
 
     def test_audit_trail_logs_tool_calls(self):
         """The audit trail should log tool calls."""

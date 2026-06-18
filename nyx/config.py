@@ -407,7 +407,7 @@ class Config:
         return merged
 
     @staticmethod
-    def _flatten_nested(raw: dict, prefix: str, keys: list[str]) -> None:
+    def _flatten_nested(raw: dict[str, Any], prefix: str, keys: list[str]) -> None:
         """Flatten nested config sections into top-level prefixed fields."""
         section = raw.get(prefix, {})
         if isinstance(section, dict):

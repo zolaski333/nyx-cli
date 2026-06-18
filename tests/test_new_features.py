@@ -23,7 +23,7 @@ from nyx.test_loop import (
     auto_correct_loop,
 )
 from nyx.subagent import Subagent, SubagentManager, SubagentResult, SubagentTask
-from nyx.agent import Agent, AgentContext
+from nyx.agent import Agent
 from nyx.config import Config
 from nyx.providers.base import ToolDefinition
 
@@ -840,6 +840,23 @@ class TestSubagentControlledTools:
         result = agent._execute_tool_call(tc, [])
         assert "Unknown tool" in result
 
+    def test_subagent_execute_tool_call_uses_approval_callbacks(self):
+        """Isolated-style subagent tool contexts should relay approval decisions."""
+        from nyx.providers.base import ToolCall
+
+        calls = []
+        agent = Subagent(
+            name="test",
+            config=self.config,
+            on_command_approval=lambda cmd: (calls.append(cmd) or (False, "bridged denial")),
+        )
+        tc = ToolCall(id="1", name="execute_command", arguments={"command": "echo hi > out.txt"})
+
+        result = agent._execute_tool_call(tc, [])
+
+        assert calls == ["echo hi > out.txt"]
+        assert "bridged denial" in result
+
     def test_subagent_multiturn_loop(self):
         """Subagent should run a multi-turn tool execution loop and pass actual results."""
         from nyx.providers.base import BaseLLMProvider, LLMResponse, ToolCall
@@ -931,7 +948,7 @@ class TestSubagentControlledTools:
         """Managers should route eligible subagents through the isolated runner."""
         calls = []
 
-        def fake_runner(*, task, config, tools, timeout_seconds=None):
+        def fake_runner(*, task, config, tools, timeout_seconds=None, **kwargs):
             calls.append((task, config, tools, timeout_seconds))
             return SubagentResult(
                 task=task.task,
@@ -1029,6 +1046,96 @@ class TestSubagentControlledTools:
         assert result.status == "timed_out"
         assert result.error == "Subagent task execution exceeded timeout."
 
+
+class TestExternalToolArgumentValidation:
+    """Security checks for MCP/skill argument validation."""
+
+    def _context_for_tool(self, tmpdir: str, definition: ToolDefinition, approvals=None):
+        from nyx.audit import AuditTrail
+        from nyx.diff_tool import PatchTool
+        from nyx.memory import MemoryManager
+        from nyx.permissions import PermissionManager
+        from nyx.sandbox import Sandbox
+        from nyx.tools import ToolContext
+
+        class FakeExternalTools:
+            def get_tool_definitions(self):
+                return [definition]
+
+        approvals = approvals or {}
+        return ToolContext(
+            config=Config(openrouter_api_key="sk-test", project_dir=tmpdir),
+            sandbox=Sandbox(project_root=tmpdir),
+            permissions=PermissionManager(),
+            audit=AuditTrail(enabled=False),
+            patch_tool=PatchTool(project_dir=tmpdir),
+            memory=MemoryManager(memory_dir=Path(tmpdir) / "memory", auto_summarise=False),
+            mcp=FakeExternalTools(),
+            on_command_approval=approvals.get("command"),
+            on_file_approval=approvals.get("file"),
+        )
+
+    def test_external_tool_blocks_undocumented_arguments(self):
+        from nyx.tools import _validate_and_sanitize_external_tool_args
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            definition = ToolDefinition(
+                name="mcp_safe_search",
+                description="Search notes",
+                parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+            )
+            context = self._context_for_tool(tmpdir, definition)
+
+            ok, err, _sanitized = _validate_and_sanitize_external_tool_args(
+                "mcp_safe_search",
+                {"query": "hello", "payload": "rm -rf /"},
+                context,
+            )
+
+            assert ok is False
+            assert "undocumented argument 'payload'" in err
+
+    def test_external_exec_tool_validates_command_even_when_key_is_args(self):
+        from nyx.tools import _validate_and_sanitize_external_tool_args
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            definition = ToolDefinition(
+                name="mcp_runner_exec",
+                description="Execute a shell command",
+                parameters={"type": "object", "properties": {"args": {"type": "string"}}},
+            )
+            context = self._context_for_tool(tmpdir, definition)
+
+            ok, err, _sanitized = _validate_and_sanitize_external_tool_args(
+                "mcp_runner_exec",
+                {"args": "rm -rf /"},
+                context,
+            )
+
+            assert ok is False
+            assert "Permission denied" in err
+
+    def test_external_non_exec_query_is_not_treated_as_command(self):
+        from nyx.tools import _validate_and_sanitize_external_tool_args
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            definition = ToolDefinition(
+                name="mcp_notes_search",
+                description="Search notes",
+                parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+            )
+            context = self._context_for_tool(tmpdir, definition)
+
+            ok, err, sanitized = _validate_and_sanitize_external_tool_args(
+                "mcp_notes_search",
+                {"query": "rm -rf / as text"},
+                context,
+            )
+
+            assert ok is True
+            assert err == ""
+            assert sanitized["query"] == "rm -rf / as text"
+
     def test_parse_bool_helper(self):
         """Test the _parse_bool helper function with various formats."""
         from nyx.tools import _parse_bool
@@ -1056,7 +1163,6 @@ class TestSubagentControlledTools:
         assert _parse_bool("n") is False
         assert _parse_bool("") is False
 
-        import pytest
         with pytest.raises(ValueError, match="Invalid boolean value: 'random'"):
             _parse_bool("random")
         with pytest.raises(ValueError, match="Invalid type for boolean parsing: list"):
@@ -1064,7 +1170,6 @@ class TestSubagentControlledTools:
 
     def test_call_fix_function_does_not_mask_type_errors(self):
         """_call_fix_function should propagate internal TypeErrors and not mask them."""
-        import pytest
         from nyx.test_loop import _call_fix_function
 
         # 1. 2-arg function with internal TypeError
@@ -1181,6 +1286,28 @@ class TestMemorySummaryInjection:
         system_msgs = [m for m in self.agent.context.messages if m["role"] == "system"]
         memory_msgs = [m for m in system_msgs if "Memory" in m.get("content", "")]
         assert len(memory_msgs) >= 0  # May or may not have summary depending on state
+
+    def test_inject_memory_summary_excludes_current_conversation(self):
+        """Current conversation summary should not duplicate loaded history."""
+        current = self.agent.memory.current
+        assert current is not None
+        current.summary = "CURRENT SUMMARY SHOULD NOT BE INJECTED"
+
+        self.agent.memory.new_conversation("Old")
+        old = self.agent.memory.current
+        assert old is not None
+        old.summary = "OLD SUMMARY SHOULD BE INJECTED"
+        self.agent.memory.switch_to(current.id)
+
+        self.agent._inject_memory_summary()
+
+        system_text = "\n".join(
+            m.get("content", "")
+            for m in self.agent.context.messages
+            if m.get("role") == "system"
+        )
+        assert "OLD SUMMARY SHOULD BE INJECTED" in system_text
+        assert "CURRENT SUMMARY SHOULD NOT BE INJECTED" not in system_text
 
 
 # =========================================================================

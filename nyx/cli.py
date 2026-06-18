@@ -1,5 +1,5 @@
-"""
- Nyx — a standard-library-first agentic coding CLI.
+﻿"""
+ Nyx â€” a standard-library-first agentic coding CLI.
 
 Auto-detects Rich for a beautiful TUI if installed, falls back to basic ANSI.
 
@@ -13,17 +13,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
 import shutil
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
-
-_approval_lock = threading.Lock()
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -37,6 +35,8 @@ from nyx.skill_manager import SkillManager
 from nyx.subagent import SubagentManager
 from nyx.agent import Agent
 from nyx.memory import MemoryManager
+from nyx.repl_controller import run_interactive_repl
+from nyx.approval import run_exclusive_approval
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +44,7 @@ logger = logging.getLogger(__name__)
 # Try to import Rich TUI
 # ---------------------------------------------------------------------------
 
-try:
-    from nyx.cli_rich import run_rich_interactive, run_rich_single
-    RICH_AVAILABLE = True
-except ImportError:
-    RICH_AVAILABLE = False
+RICH_AVAILABLE = importlib.util.find_spec("nyx.cli_rich") is not None
 
 # ---------------------------------------------------------------------------
 # Fallback ANSI helpers (used when Rich is not available)
@@ -86,6 +82,7 @@ def render_markdown(text: str, force_color: bool = False) -> str:
     lines = text.splitlines()
     rendered_lines = []
     in_code_block = False
+    list_bullet = "\u25c8"
     
     # Inline helper to style text if color is enabled/forced
     def style(txt: str, ansi_code: str) -> str:
@@ -95,13 +92,13 @@ def render_markdown(text: str, force_color: bool = False) -> str:
         # Code block toggle
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
-            border_char = "─"
-            rendered_lines.append(style(f"╭{border_char * 78}╮" if in_code_block else f"╰{border_char * 78}╯", DIM + YELLOW))
+            border_char = "\u2500"
+            rendered_lines.append(style(f"\u256d{border_char * 78}\u256e" if in_code_block else f"\u2570{border_char * 78}\u256f", DIM + YELLOW))
             continue
 
         if in_code_block:
             # Code block lines
-            rendered_lines.append(style("│ ", DIM + YELLOW) + style(line, YELLOW) + " " * max(0, 76 - len(line)) + style(" │", DIM + YELLOW))
+            rendered_lines.append(style("\u2502 ", DIM + YELLOW) + style(line, YELLOW) + " " * max(0, 76 - len(line)) + style(" \u2502", DIM + YELLOW))
             continue
 
         # Headings
@@ -112,32 +109,32 @@ def render_markdown(text: str, force_color: bool = False) -> str:
             if level == 1:
                 rendered_lines.append("")
                 rendered_lines.append(style(heading_text.upper(), BOLD + CYAN))
-                rendered_lines.append(style("═" * len(heading_text), BOLD + CYAN))
+                rendered_lines.append(style("\u2550" * len(heading_text), BOLD + CYAN))
             elif level == 2:
                 rendered_lines.append("")
                 rendered_lines.append(style(heading_text, BOLD + YELLOW))
-                rendered_lines.append(style("─" * len(heading_text), DIM + YELLOW))
+                rendered_lines.append(style("\u2500" * len(heading_text), DIM + YELLOW))
             else:
                 rendered_lines.append(style(heading_text, BOLD + GREEN))
             continue
 
         # Horizontal rules
         if re.match(r"^[-*_]{3,}\s*$", line.strip()):
-            rendered_lines.append(style("─" * 80, DIM))
+            rendered_lines.append(style("\u2500" * 80, DIM))
             continue
 
         # Blockquotes
         if line.strip().startswith(">"):
             content = line.strip().lstrip(">").strip()
-            rendered_lines.append(style("│ ", CYAN) + style(content, DIM))
+            rendered_lines.append(style("\u2502 ", CYAN) + style(content, DIM))
             continue
 
         # Lists (unordered/ordered)
-        m_list = re.match(r"^(\s*)[-*+•]\s+(.*)$", line)
+        m_list = re.match(r"^(\s*)[-*+\u2022]\s+(.*)$", line)
         if m_list:
             indent = m_list.group(1)
             content = m_list.group(2)
-            rendered_lines.append(f"{indent}{style('◈', GREEN)} {content}")
+            rendered_lines.append(f"{indent}{style(list_bullet, GREEN)} {content}")
             continue
 
         # Style Bold (**text** or __text__)
@@ -201,7 +198,7 @@ class ProgressBar:
             return
         frac = self._current / max(self.total, 1)
         filled = int(self.width * frac)
-        bar = "█" * filled + "░" * (self.width - filled)
+        bar = "â–ˆ" * filled + "â–‘" * (self.width - filled)
         elapsed = time.time() - self._start_time
         pct = int(frac * 100)
         print(
@@ -226,10 +223,10 @@ class ProgressBar:
 # ---------------------------------------------------------------------------
 
 WELCOME_BANNER = f"""
-{c('╔══════════════════════════════════════════════════════╗', HEADER)}
-{c('║', HEADER)}            {c('⚡ Nyx v0.2.1', BOLD)}              {c('║', HEADER)}
-{c('║', HEADER)}    {c('Zero-dependency agentic coding tool', DIM)}  {c('║', HEADER)}
-{c('╚══════════════════════════════════════════════════════╝', HEADER)}
+{c('â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—', HEADER)}
+{c('â•‘', HEADER)}            {c('âš¡ Nyx v0.2.1', BOLD)}              {c('â•‘', HEADER)}
+{c('â•‘', HEADER)}    {c('Zero-dependency agentic coding tool', DIM)}  {c('â•‘', HEADER)}
+{c('â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•', HEADER)}
 """
 
 HELP_TEXT = f"""
@@ -272,13 +269,13 @@ def print_tools(agent: Agent, page: int = 1, page_size: int = 10) -> None:
     end = min(start + page_size, total)
 
     print(f"\n{c('Available Tools:', BOLD)}  {c(f'Page {page}/{total_pages}', DIM)}")
-    print(f"  {c('─' * 50, DIM)}")
+    print(f"  {c('â”€' * 50, DIM)}")
     for t in tools[start:end]:
         desc = t.description[:80] + ("..." if len(t.description) > 80 else "")
-        print(f"  {c(f'◈ {t.name}', CYAN)}")
+        print(f"  {c(f'â—ˆ {t.name}', CYAN)}")
         print(f"    {c(desc, DIM)}")
     if total_pages > 1:
-        print(f"  {c(f'Page {page}/{total_pages} — use /tools {page+1} for next page', DIM)}")
+        print(f"  {c(f'Page {page}/{total_pages} â€” use /tools {page+1} for next page', DIM)}")
     print()
 
 
@@ -289,7 +286,7 @@ def print_memory_paginated(agent: Agent, page: int = 1, page_size: int = 10) -> 
         print(f"{c('No active conversation.', YELLOW)}")
         return
 
-    print(f"\n{c('🧠 Memory:', BOLD)} {conv.title}")
+    print(f"\n{c('ðŸ§  Memory:', BOLD)} {conv.title}")
     print(f"  {c('Messages:', DIM)} {len(conv.entries)}  {c('Tokens:', DIM)} {conv.total_tokens}")
     print(f"  {c('Summary:', DIM)} {conv.summary[:200] if conv.summary else 'None'}")
 
@@ -323,48 +320,48 @@ def print_conversations_paginated(agent: Agent, page: int = 1, page_size: int = 
     start = (page - 1) * page_size
     end = min(start + page_size, total)
 
-    print(f"\n{c('📂 Conversations:', BOLD)}  {c(f'Page {page}/{total_pages}', DIM)}")
-    print(f"  {c('─' * 60, DIM)}")
+    print(f"\n{c('ðŸ“‚ Conversations:', BOLD)}  {c(f'Page {page}/{total_pages}', DIM)}")
+    print(f"  {c('â”€' * 60, DIM)}")
     for conv in convs[start:end]:
-        current_mark = " ← current" if conv["id"] == agent.memory.current.id else ""
+        current_mark = " â† current" if agent.memory.current is not None and conv["id"] == agent.memory.current.id else ""
         print(f"  [{c(conv['id'][:8], CYAN)}] {c(conv['title'][:40], BOLD)} "
               f"({conv['entry_count']} msgs){c(current_mark, GREEN)}")
         if conv["summary"]:
             print(f"       {c(conv['summary'][:60], DIM)}")
     if total_pages > 1:
-        print(f"  {c(f'Page {page}/{total_pages} — use /conversations {page+1} for next page', DIM)}")
+        print(f"  {c(f'Page {page}/{total_pages} â€” use /conversations {page+1} for next page', DIM)}")
     print()
 
 
 def _make_ansi_approval_handler() -> Callable[[str], tuple[bool, str]]:
     """Create an interactive approval handler for the ANSI fallback CLI."""
     def handle_approval(command: str) -> tuple[bool, str]:
-        with _approval_lock:
-            print(f"\n{c('⚠️  SECURITY', YELLOW)} The AI wants to execute a potentially dangerous command:")
+        def prompt() -> tuple[bool, str]:
+            print(f"\n{c('âš ï¸  SECURITY', YELLOW)} The AI wants to execute a potentially dangerous command:")
             print(f"  {c(command, CYAN)}")
             response = input(f"  {c('Allow?', BOLD)} (y/n): ").strip().lower()
             if response == "y":
                 return True, ""
-            else:
-                reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
-                return False, reason or "User denied the command."
+            reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
+            return False, reason or "User denied the command."
+        return run_exclusive_approval(prompt)
     return handle_approval
 
 
 def _make_ansi_file_approval_handler() -> Callable[[str, str, str], tuple[bool, str]]:
     """Create an interactive approval handler for file operations (diff/patch)."""
     def handle_file_approval(path: str, summary: str, diff: str) -> tuple[bool, str]:
-        with _approval_lock:
-            print(f"\n{c('📝 FILE OPERATION', CYAN)} {summary}")
+        def prompt() -> tuple[bool, str]:
+            print(f"\n{c('ðŸ“ FILE OPERATION', CYAN)} {summary}")
             print(f"  {c(diff[:2000], DIM)}")
             if len(diff) > 2000:
                 print(f"  {c('(... diff truncated, full diff has ' + str(len(diff)) + ' chars)', DIM)}")
             response = input(f"  {c('Apply this change?', BOLD)} (y/n): ").strip().lower()
             if response == "y":
                 return True, ""
-            else:
-                reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
-                return False, reason or "User denied the file change."
+            reason = input(f"  {c('Reason for denial:', DIM)} ").strip()
+            return False, reason or "User denied the file change."
+        return run_exclusive_approval(prompt)
     return handle_file_approval
 
 
@@ -523,232 +520,139 @@ def setup_readline(agent: Agent) -> None:
             
             return formatted[state] if state < len(formatted) else None
 
-        readline.set_completer(completer)
+        readline_api: Any = readline
+        readline_api.set_completer(completer)
         # Tab key completion (depends on platform)
         try:
             if sys.platform == "darwin":
-                readline.parse_and_bind("bind ^I rl_complete")
+                readline_api.parse_and_bind("bind ^I rl_complete")
             elif os.name != "nt":
-                readline.parse_and_bind("tab: complete")
+                readline_api.parse_and_bind("tab: complete")
         except Exception:
             pass
             
         # History management
         history_path = os.path.expanduser("~/.nyx_history")
         try:
-            readline.read_history_file(history_path)
+            readline_api.read_history_file(history_path)
         except FileNotFoundError:
             pass
             
-        readline.set_history_length(1000)
-        atexit.register(readline.write_history_file, history_path)
+        readline_api.set_history_length(1000)
+        atexit.register(readline_api.write_history_file, history_path)
         
     except Exception:
         pass
 
 
+class AnsiReplUI:
+    """ANSI rendering adapter for the shared REPL controller."""
+
+    def __init__(self) -> None:
+        self.history = REPLHistory()
+
+    def setup(self, agent: Agent, config: Config) -> None:
+        setup_readline(agent)
+        agent.on_command_approval = _make_ansi_approval_handler()
+        agent.on_file_approval = _make_ansi_file_approval_handler()
+        print_welcome(config, len(agent.tools))
+
+    def read_input(self) -> str:
+        return input(f"\n{c('You', USER_COLOR)}> ")
+
+    def append_history(self, text: str) -> None:
+        self.history.append(text)
+
+    def show_bye(self) -> None:
+        print(f"{c('Bye!', GREEN)}")
+
+    def show_help(self) -> None:
+        print(HELP_TEXT)
+
+    def show_context_cleared(self) -> None:
+        print(f"{c('Context cleared.', YELLOW)}")
+
+    def show_agent_reset(self) -> None:
+        print(f"{c('Agent reset. MCP disconnected.', YELLOW)}")
+
+    def show_model(self, model: str) -> None:
+        print(f"{c('Current model:', BOLD)} {model}")
+
+    def show_model_changed(self, model: str) -> None:
+        print(f"{c('Model changed:', BOLD)} {model}")
+
+    def show_status(self, message: str, *, success: bool = False) -> None:
+        print(f"{c(message, GREEN if success else YELLOW)}")
+
+    def show_mode_status(self, mode: str, autonomy: str) -> None:
+        print(f"{c('Current mode:', BOLD)} {mode}  |  autonomy: {autonomy}")
+
+    def show_autonomy_status(self, autonomy: str) -> None:
+        print(f"{c('Current autonomy:', BOLD)} {autonomy}")
+
+    def show_config_status(self, config: Config, paths: list[tuple[str, Path]]) -> None:
+        print(f"\n{c('Nyx Configuration Status', BOLD + CYAN)}")
+        print(f"  {c('Active Provider:', DIM)} {config.provider}")
+        print(f"  {c('Active Model:', DIM)}    {config.model}")
+        print(f"  {c('Active Mode:', DIM)}     {config.agent_mode}")
+        print(f"  {c('Active Autonomy:', DIM)} {config.agent_autonomy}")
+        print(f"\n{c('Configuration Files (Priority order):', BOLD)}")
+        for name, path in paths:
+            status = c('exists', GREEN) if path.exists() else c('not found', DIM)
+            print(f"  - {c(name, BOLD)}: {path} ({status})")
+        print(f"\n{c('Use `/config save` to persist current session settings to project config.', DIM)}")
+        print(f"{c('Use `/config save --global` to persist current session settings globally.', DIM)}")
+        print(f"{c('Use `/config set <key> <value>` to change a config option.', DIM)}")
+
+    def show_config_saved(self, path: Path) -> None:
+        print(f"{c('Successfully saved session config to:', GREEN)} {path}")
+
+    def show_config_set(self, key: str, value: Any, path: Path) -> None:
+        print(f"{c(f'Updated config key `{key}` to `{value}` in:', GREEN)} {path}")
+
+    def show_config_error(self, message: str) -> None:
+        print(f"{c(message, RED)}")
+
+    def show_tools(self, agent: Agent, page: int) -> None:
+        print_tools(agent, page=page)
+
+    def show_memory(self, agent: Agent, page: int) -> None:
+        print_memory_paginated(agent, page=page)
+
+    def show_conversations(self, agent: Agent, page: int) -> None:
+        print_conversations_paginated(agent, page=page)
+
+    def show_switched_conversation(self, title: str) -> None:
+        print(f"{c('Switched to conversation:', GREEN)} {title}")
+
+    def show_multiple_conversation_matches(self, matches: list[Any]) -> None:
+        print(f"{c('Multiple matches - use full ID:', YELLOW)}")
+        for match in matches:
+            print(f"  [{c(match.id, CYAN)}] {match.title}")
+
+    def show_conversation_not_found(self, conv_id: str) -> None:
+        print(f"{c(f'Conversation not found: {conv_id}', YELLOW)}")
+
+    def make_on_token(self) -> Callable[[str], None]:
+        return _make_ansi_on_token()
+
+    def before_agent_response(self, *, stream: bool) -> None:
+        if stream:
+            print(f"{c('Agent', ASSISTANT_COLOR)}> ", end='', flush=True)
+
+    def show_agent_result(self, result: str, *, stream: bool) -> None:
+        if not stream:
+            print(f"{c('Agent', ASSISTANT_COLOR)}> {render_markdown(result)}")
+        else:
+            print()
+
+    def show_error(self, error: Exception) -> None:
+        print(f"\n{c(f'Error: {error}', ERROR_COLOR)}")
+
+
 def run_ansi_interactive(agent: Agent, config: Config) -> None:
     """Fallback interactive REPL (no Rich)."""
-    setup_readline(agent)
-    agent.on_command_approval = _make_ansi_approval_handler()
-    agent.on_file_approval = _make_ansi_file_approval_handler()
-    history = REPLHistory()
-    print_welcome(config, len(agent.tools))
-
-    while True:
-        try:
-            raw_input = input(f"\n{c('You', USER_COLOR)}> ")
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{c('Bye! 👋', GREEN)}")
-            agent.memory.save_all()
-            break
-
-        # Tab-like autocompletion via double-tab (user presses Enter on empty after partial)
-        user_input = raw_input.strip()
-
-        if not user_input:
-            continue
-
-        # History: up-arrow recall not possible in basic input(), but we store history
-        history.append(user_input)
-
-        # Built-in commands
-        if user_input in {"/exit", "/quit", "/q"}:
-            print(f"{c('Bye! 👋', GREEN)}")
-            agent.memory.save_all()
-            break
-        if user_input in {"/help", "/?"}:
-            print(HELP_TEXT)
-            continue
-        if user_input == "/clear":
-            agent.reset_context()
-            print(f"{c('Context cleared.', YELLOW)}")
-            continue
-        if user_input == "/reset":
-            agent.shutdown()
-            agent.reset_context()
-            print(f"{c('Agent reset. MCP disconnected.', YELLOW)}")
-            continue
-        if user_input == "/model":
-            print(f"{c('Current model:', BOLD)} {config.model}")
-            continue
-        if user_input.startswith("/model "):
-            config.model = user_input[7:].strip()
-            agent.provider = get_provider(config)
-            print(f"{c('Model changed:', BOLD)} {config.model}")
-            continue
-
-        if user_input.startswith("/mode"):
-            rest = user_input[5:].strip()
-            if not rest:
-                print(f"{c('Current mode:', BOLD)} {config.agent_mode}  |  autonomy: {config.agent_autonomy}")
-            else:
-                msg = agent.switch_mode(rest)
-                print(f"{c(msg, GREEN if 'switched' in msg else YELLOW)}")
-            continue
-
-        if user_input.startswith("/autonomy"):
-            rest = user_input[9:].strip()
-            if not rest:
-                print(f"{c('Current autonomy:', BOLD)} {config.agent_autonomy}")
-            else:
-                msg = agent.switch_autonomy(rest)
-                print(f"{c(msg, GREEN if 'switched' in msg else YELLOW)}")
-            continue
-
-        if user_input.startswith("/config"):
-            args_list = user_input[7:].strip().split()
-            if not args_list:
-                # Print current configuration status
-                print(f"\n{c('Nyx Configuration Status', BOLD + CYAN)}")
-                print(f"  {c('Active Provider:', DIM)} {config.provider}")
-                print(f"  {c('Active Model:', DIM)}    {config.model}")
-                print(f"  {c('Active Mode:', DIM)}     {config.agent_mode}")
-                print(f"  {c('Active Autonomy:', DIM)} {config.agent_autonomy}")
-                print(f"\n{c('Configuration Files (Priority order):', BOLD)}")
-                paths = [
-                    ("User (Global)", DEFAULT_USER_CONFIG_PATH),
-                    ("Project (Local)", _project_config_path(config.project_dir)),
-                ]
-                for name, path in paths:
-                    status = c("exists", GREEN) if path.exists() else c("not found", DIM)
-                    print(f"  • {c(name, BOLD)}: {path} ({status})")
-                print(f"\n{c('Use `/config save` to persist current session settings to project config.', DIM)}")
-                print(f"{c('Use `/config save --global` to persist current session settings globally.', DIM)}")
-                print(f"{c('Use `/config set <key> <value>` to change a config option.', DIM)}")
-                continue
-
-            subcmd = args_list[0].lower()
-            if subcmd == "save":
-                # Save current settings (model, provider, agent.mode, agent.autonomy)
-                use_global = "--global" in args_list or "-g" in args_list
-                path = DEFAULT_USER_CONFIG_PATH if use_global else _project_config_path(config.project_dir)
-                try:
-                    data = _load_config_file(path)
-                    data["provider"] = config.provider
-                    data["model"] = config.model
-                    _set_nested(data, "agent.mode", config.agent_mode)
-                    _set_nested(data, "agent.autonomy", config.agent_autonomy)
-                    _write_config_file(path, data)
-                    print(f"{c('Successfully saved session config to:', GREEN)} {path}")
-                except Exception as e:
-                    print(f"{c(f'Failed to save config: {e}', RED)}")
-                continue
-
-            elif subcmd == "set":
-                # Set a specific key-value pair
-                use_global = False
-                key_val_args = []
-                for a in args_list[1:]:
-                    if a in ("--global", "-g"):
-                        use_global = True
-                    else:
-                        key_val_args.append(a)
-                
-                if len(key_val_args) < 2:
-                    print(f"{c('Error: `/config set [--global] <key> <value>` requires a key and a value.', RED)}")
-                    continue
-                
-                key = key_val_args[0]
-                val_str = " ".join(key_val_args[1:])
-                path = DEFAULT_USER_CONFIG_PATH if use_global else _project_config_path(config.project_dir)
-                try:
-                    data = _load_config_file(path)
-                    parsed_val = _parse_config_value(val_str)
-                    _set_nested(data, key, parsed_val)
-                    _write_config_file(path, data)
-                    print(f"{c(f'Updated config key `{key}` to `{parsed_val}` in:', GREEN)} {path}")
-                    # Apply immediately
-                    if key == "model":
-                        config.model = parsed_val
-                        agent.provider = get_provider(config)
-                    elif key == "provider":
-                        config.provider = parsed_val
-                        agent.provider = get_provider(config)
-                    elif key == "agent.mode":
-                        agent.switch_mode(parsed_val)
-                    elif key == "agent.autonomy":
-                        agent.switch_autonomy(parsed_val)
-                except Exception as e:
-                    print(f"{c(f'Failed to update config: {e}', RED)}")
-                continue
-            else:
-                print(f"{c(f'Unknown config subcommand: {subcmd}. Valid options: save, set', RED)}")
-                continue
-
-        # Paginated commands
-        if user_input.startswith("/tools"):
-            page = _get_paginated_arg(user_input, "/tools")
-            print_tools(agent, page=page)
-            continue
-
-        if user_input.startswith("/memory"):
-            page = _get_paginated_arg(user_input, "/memory")
-            print_memory_paginated(agent, page=page)
-            continue
-
-        if user_input.startswith("/conversations"):
-            page = _get_paginated_arg(user_input, "/conversations")
-            print_conversations_paginated(agent, page=page)
-            continue
-
-        # Switch conversation
-        if user_input.startswith("/switch "):
-            conv_id = user_input[8:].strip()
-            if agent.memory.switch_to(conv_id):
-                conv = agent.memory.current
-                agent.load_conversation_history()
-                print(f"{c('Switched to conversation:', GREEN)} {conv.title if conv else conv_id}")
-            else:
-                # Try partial match
-                matches = [c for c in agent.memory.conversations.values() if c.id.startswith(conv_id)]
-                if len(matches) == 1:
-                    agent.memory.switch_to(matches[0].id)
-                    agent.load_conversation_history()
-                    print(f"{c('Switched to conversation:', GREEN)} {matches[0].title}")
-                elif len(matches) > 1:
-                    print(f"{c('Multiple matches — use full ID:', YELLOW)}")
-                    for m in matches:
-                        print(f"  [{c(m.id, CYAN)}] {m.title}")
-                else:
-                    print(f"{c(f'Conversation not found: {conv_id}', YELLOW)}")
-            continue
-
-        # Agent execution
-        on_token = _make_ansi_on_token()
-        if config.stream:
-            print(f"{c('Agent', ASSISTANT_COLOR)}> ", end="", flush=True)
-
-        try:
-            result = agent.run(user_input, on_token=on_token)
-            if not config.stream:
-                print(f"{c('Agent', ASSISTANT_COLOR)}> {render_markdown(result)}")
-            else:
-                print()
-                # Print rendered Markdown afterwards to replace raw token display with formatted text
-                print(f"\n{c('Agent (formatted)', ASSISTANT_COLOR)}>\n{render_markdown(result)}")
-        except Exception as e:
-            print(f"\n{c(f'Error: {e}', ERROR_COLOR)}")
+    run_interactive_repl(agent, config, AnsiReplUI())
 
 
 def run_ansi_single(agent: Agent, prompt: str) -> None:
@@ -764,7 +668,6 @@ def run_ansi_single(agent: Agent, prompt: str) -> None:
         print(f"{c('Agent', ASSISTANT_COLOR)}> {render_markdown(result)}")
     else:
         print()
-        print(f"\n{c('Agent (formatted)', ASSISTANT_COLOR)}>\n{render_markdown(result)}")
     agent.shutdown()
 
 
@@ -774,7 +677,7 @@ def run_ansi_single(agent: Agent, prompt: str) -> None:
 
 
 def _run_json(agent: Agent, prompt: str) -> None:
-    """Run in JSON mode — output structured JSON for CI/CD pipelines."""
+    """Run in JSON mode â€” output structured JSON for CI/CD pipelines."""
     start = time.time()
 
     try:
@@ -845,7 +748,8 @@ def _load_config_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
 
 
 def _write_config_file(path: Path, data: dict[str, Any]) -> None:
@@ -1097,7 +1001,7 @@ def main() -> None:
         sys.exit(_handle_config_command(sys.argv[1:]))
 
     parser = argparse.ArgumentParser(
-        description="Nyx — standard-library-first agentic coding CLI",
+        description="Nyx â€” standard-library-first agentic coding CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -1148,7 +1052,7 @@ def main() -> None:
         # Prepend piped content to the given prompt
         args.prompt = f"Context from stdin:\n```\n{piped_data}\n```\n\nTask: {args.prompt}"
         if not args.json:
-            print(f"{c('📥 Pipe mode: ' + str(len(piped_data)) + ' chars from stdin', DIM)}", file=sys.stderr)
+            print(f"{c('ðŸ“¥ Pipe mode: ' + str(len(piped_data)) + ' chars from stdin', DIM)}", file=sys.stderr)
 
     # Validate --json requires --prompt
     if args.json and not args.prompt:

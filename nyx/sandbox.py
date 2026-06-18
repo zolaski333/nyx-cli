@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import os
+import fnmatch
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,15 @@ class PathTraversalError(ValueError):
         self.resolved = resolved
         self.root = root
         super().__init__(f"Path traversal blocked: '{path}' resolves to '{resolved}' outside project root '{root}'")
+
+
+class SandboxDenyPathError(PermissionError):
+    """Raised when a path matches an explicit sandbox deny rule."""
+
+    def __init__(self, path: str, pattern: str):
+        self.path = path
+        self.pattern = pattern
+        super().__init__(f"Path denied by sandbox rule: '{path}' matches '{pattern}'")
 
 
 class Sandbox:
@@ -43,6 +54,7 @@ class Sandbox:
         self._auto_chdir = auto_chdir
         self._allow_extra: list[Path] = []
         self._deny_patterns: list[str] = deny_paths or []
+        self._deny_resolved: list[Path] = []
         self.use_docker = use_docker
         self.docker_image = docker_image
 
@@ -54,6 +66,13 @@ class Sandbox:
                 resolved = Path(p).resolve()
                 if resolved.exists() or resolved.parent.exists():
                     self._allow_extra.append(resolved)
+
+        if deny_paths:
+            for p in deny_paths:
+                try:
+                    self._deny_resolved.append(Path(p).resolve())
+                except OSError:
+                    logger.debug("Could not resolve deny path pattern: %s", p)
 
     @staticmethod
     def _safe_cwd() -> Path:
@@ -86,6 +105,8 @@ class Sandbox:
     def chdir(self, path: str | Path | None = None) -> None:
         """Change to a directory within the sandbox. If None, go to root."""
         target = self._root if path is None else self.resolve(path)
+        if target is None:
+            target = self._safe_cwd()
         os.chdir(target)
         logger.debug("Changed directory to: %s", target)
 
@@ -129,11 +150,13 @@ class Sandbox:
 
         # If no sandbox root is set, allow everything
         if self._root is None:
+            self._check_denied(resolved)
             return resolved
 
         # Check if the resolved path is within the sandbox root
         try:
             resolved.relative_to(self._root)
+            self._check_denied(resolved)
             return resolved
         except ValueError:
             pass
@@ -142,12 +165,29 @@ class Sandbox:
         for allowed in self._allow_extra:
             try:
                 resolved.relative_to(allowed)
+                self._check_denied(resolved)
                 return resolved
             except ValueError:
                 pass
 
         # Path traversal detected
         raise PathTraversalError(str(path), str(resolved), str(self._root))
+
+    def _check_denied(self, resolved: Path) -> None:
+        resolved_str = str(resolved)
+        resolved_norm = resolved_str.lower() if os.name == "nt" else resolved_str
+
+        for denied in self._deny_resolved:
+            try:
+                resolved.relative_to(denied)
+                raise SandboxDenyPathError(resolved_str, str(denied))
+            except ValueError:
+                pass
+
+        for pattern in self._deny_patterns:
+            pattern_norm = pattern.lower() if os.name == "nt" else pattern
+            if fnmatch.fnmatch(resolved_norm, pattern_norm):
+                raise SandboxDenyPathError(resolved_str, pattern)
 
     def is_within_sandbox(self, path: str | Path) -> bool:
         """Check if a path is within the sandbox without raising."""
@@ -180,9 +220,8 @@ class Sandbox:
         """Prepare a shell command for execution within the sandbox.
 
         If use_docker is enabled and docker/podman is available, wraps the command
-        to run inside a Docker container.
-        Otherwise, if auto_chdir is enabled and a root is set, wraps the command
-        to ensure it runs in the project root directory.
+        to run inside a Docker container. Local subprocess execution must pass
+        cwd explicitly instead of relying on shell string prefixing.
         """
         if self.use_docker and self.is_docker_available():
             import shutil
@@ -191,15 +230,9 @@ class Sandbox:
             quoted_cmd = shlex_quote(command)
             return f'{docker_bin} run --rm -v {shlex_quote(root_dir)}:/workspace -w /workspace {self.docker_image} sh -c {quoted_cmd}'
 
-        if self._auto_chdir and self._root:
-            # Use cd to ensure the command runs in the project root
-            # This handles cases where the shell might have a different cwd
-            if os.name == "nt":
-                return f'cd /d "{str(self._root)}" && {command}'
-            return f"cd {shlex_quote(str(self._root))} && {command}"
         return command
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize sandbox config for display/logging."""
         return {
             "root": self.root_str,

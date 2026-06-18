@@ -1,7 +1,8 @@
-"""Tests for rate limiter, retry with backoff, and robust timeout."""
+"""Tests for rate limiter, retry with backoff, and transport timeout policy."""
 from __future__ import annotations
 
 import time
+import urllib.error
 
 import pytest
 
@@ -10,7 +11,6 @@ from nyx.rate_limiter import (
     exponential_backoff,
     retry_with_backoff,
     timeout,
-    TimeoutError,
     ResilientClient,
 )
 
@@ -182,6 +182,45 @@ class TestRetryWithBackoff:
             retry_with_backoff(fn, max_retries=0, base_delay=0.01)
         assert call_count == 1
 
+    def test_permanent_http_client_errors_are_not_retried(self):
+        """Permanent 4xx HTTP errors should bypass the OSError retry path."""
+        call_count = 0
+
+        def fn():
+            nonlocal call_count
+            call_count += 1
+            raise urllib.error.HTTPError(
+                "https://example.test",
+                401,
+                "Unauthorized",
+                {},
+                None,
+            )
+
+        with pytest.raises(urllib.error.HTTPError):
+            retry_with_backoff(fn, max_retries=3, base_delay=0.01)
+        assert call_count == 1
+
+    def test_transient_http_errors_are_retried(self):
+        """429 and 5xx HTTP errors should remain transport-retryable."""
+        call_count = 0
+
+        def fn():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise urllib.error.HTTPError(
+                    "https://example.test",
+                    429,
+                    "Too Many Requests",
+                    {},
+                    None,
+                )
+            return "ok"
+
+        assert retry_with_backoff(fn, max_retries=2, base_delay=0.01) == "ok"
+        assert call_count == 2
+
     def test_on_retry_callback(self):
         """Should call on_retry callback before each retry."""
         call_count = 0
@@ -225,22 +264,16 @@ class TestTimeout:
         assert result == "done"
 
     def test_timeout_raises(self):
-        """Should raise TimeoutError if operation takes too long."""
-        import threading
+        """Compatibility timeout context should not pretend to interrupt blocks."""
 
-        # Use an event to simulate a long operation
-        slow_op = threading.Event()
-
-        with pytest.raises(TimeoutError, match="Operation timed out"):
-            with timeout(seconds=0.05):
-                slow_op.wait(1.0)  # This will be interrupted
+        with timeout(seconds=0.05):
+            time.sleep(0.06)
 
     def test_custom_message(self):
-        """Should use custom timeout message."""
-        with pytest.raises(TimeoutError, match="Custom timeout message"):
-            with timeout(seconds=0.01, message="Custom timeout message"):
-                import threading
-                threading.Event().wait(1.0)
+        """Custom timeout message is retained for compatibility."""
+        with timeout(seconds=0.01, message="Custom timeout message"):
+            result = "completed"
+        assert result == "completed"
 
     def test_nested_timeout(self):
         """Nested timeouts should work."""
@@ -296,19 +329,15 @@ class TestResilientClient:
         elapsed = time.time() - start
         assert elapsed < 0.1  # Fast because rate is high
 
-    def test_execute_timeout(self):
-        """Should timeout on slow operations."""
-        client = ResilientClient(
-            rate=1000.0, max_retries=0, default_timeout=0.05,
-        )
+    def test_execute_does_not_interrupt_generic_call(self):
+        """Generic calls rely on native transport timeouts, not thread injection."""
+        client = ResilientClient(rate=1000.0, max_retries=0)
 
         def slow_fn():
-            import threading
-            threading.Event().wait(1.0)
-            return "too late"
+            time.sleep(0.06)
+            return "completed"
 
-        with pytest.raises((TimeoutError, OSError)):
-            client.execute(slow_fn)
+        assert client.execute(slow_fn) == "completed"
 
     def test_rate_limiter_property(self):
         """Should expose the rate limiter."""

@@ -1,11 +1,9 @@
 """Tests for Nyx diff_tool — patch parsing, validation, conflict detection, rollback, history."""
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from nyx.diff_tool import (
     # Core

@@ -267,7 +267,14 @@ def _search_rg(
     cmd.append(str(root))
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
     except subprocess.TimeoutExpired:
         return SearchResult(query=pattern, error="Search timed out", engine="rg")
     except FileNotFoundError:
@@ -413,7 +420,14 @@ def _search_grep(
     cmd.append(str(root))
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
     except subprocess.TimeoutExpired:
         return SearchResult(query=pattern, error="Search timed out", engine="grep")
     except Exception as e:
@@ -545,25 +559,53 @@ def search_code(
     root = Path(root).resolve() if root else Path.cwd().resolve()
     engine = _find_engine()
 
-    kwargs = {
-        "file_pattern": file_pattern,
-        "max_results": max_results,
-        "context_lines": context_lines,
-        "case_sensitive": case_sensitive,
-        "regex": regex or (not fixed_strings and bool(re.search(r'[.*+?^${}()|\[\]\\]', pattern))),
-        "fixed_strings": fixed_strings,
-    }
+    effective_regex = regex or (
+        not fixed_strings and bool(re.search(r'[.*+?^${}()|\[\]\\]', pattern))
+    )
 
     if engine == "rg":
-        result = _search_rg(pattern, root, **kwargs)
+        result = _search_rg(
+            pattern,
+            root,
+            file_pattern=file_pattern,
+            max_results=max_results,
+            context_lines=context_lines,
+            case_sensitive=case_sensitive,
+            fixed_strings=fixed_strings,
+        )
     elif engine == "ag":
         # Fall through to grep for now (ag is similar to rg)
-        result = _search_grep(pattern, root, **kwargs)
+        result = _search_grep(
+            pattern,
+            root,
+            file_pattern=file_pattern,
+            max_results=max_results,
+            context_lines=context_lines,
+            case_sensitive=case_sensitive,
+            fixed_strings=fixed_strings,
+        )
         result.engine = "ag"
     elif engine == "grep":
-        result = _search_grep(pattern, root, **kwargs)
+        result = _search_grep(
+            pattern,
+            root,
+            file_pattern=file_pattern,
+            max_results=max_results,
+            context_lines=context_lines,
+            case_sensitive=case_sensitive,
+            fixed_strings=fixed_strings,
+        )
     else:
-        result = _search_python_fallback(pattern, root, **kwargs)
+        result = _search_python_fallback(
+            pattern,
+            root,
+            file_pattern=file_pattern,
+            max_results=max_results,
+            context_lines=context_lines,
+            case_sensitive=case_sensitive,
+            regex=effective_regex,
+            fixed_strings=fixed_strings,
+        )
 
     return result
 

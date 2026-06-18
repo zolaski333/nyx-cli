@@ -3,11 +3,11 @@ requires = ["setuptools>=68.0", "wheel>=0.41"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nyx"
+name = "nyx-cli"
 version = "0.2.1"
 description = "Standard-library-first agentic coding CLI with guarded edits, MCP, skills, subagents, web search, and multi-provider support"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 authors = [
     { name = "Nyx Contributors" },
 ]
@@ -17,7 +17,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -32,17 +31,28 @@ Homepage = "https://github.com/zolaski333/nyx-cli"
 Repository = "https://github.com/zolaski333/nyx-cli"
 Documentation = "https://github.com/zolaski333/nyx-cli#readme"
 Issues = "https://github.com/zolaski333/nyx-cli/issues"
+Security = "https://github.com/zolaski333/nyx-cli/security/policy"
 
 [project.optional-dependencies]
 tui = ["rich>=13.0.0"]
-dev = ["pytest>=7.0", "mypy>=1.0", "ruff>=0.1", "rich>=13.0.0"]
+dev = ["pytest>=7.0", "mypy>=1.0", "ruff>=0.1", "rich>=13.0.0", "build>=1.0", "twine>=5.0"]
 
 [project.scripts]
 nyx = "nyx.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["nyx*"]
+exclude = ["tests*", "skills*"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+
+[tool.ruff.lint]
+ignore = [
+    "E402",  # Some modules adjust import paths or group optional imports after setup code.
+    "E741",  # Existing code uses short loop variables in localized comprehensions.
+]
 
 [tool.mypy]
 python_version = "3.10"
@@ -51,8 +61,6 @@ ignore_missing_imports = true
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-disallow_any_unimported = false
-disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
