@@ -558,7 +558,14 @@ class AnsiReplUI:
         print_welcome(config, len(agent.tools))
 
     def read_input(self) -> str:
-        return input(f"\n{c('You', USER_COLOR)}> ")
+        prompt = f"\n{c('You', USER_COLOR)}> "
+        try:
+            import readline
+            import re
+            prompt = re.sub(r"(\033\[[0-9;]*[a-zA-Z])", r"\001\1\002", prompt)
+        except ImportError:
+            pass
+        return input(prompt)
 
     def append_history(self, text: str) -> None:
         self.history.append(text)

@@ -616,7 +616,17 @@ class RichReplUI:
         mode = self.config.agent_mode
         autonomy = self.config.agent_autonomy
         prompt_str = f"\n[bold {p}]nyx[/bold {p}] [dim]({mode} • {autonomy})[/dim] [bold {s}]❯[/bold {s} "
-        return str(self.console.input(prompt_str))
+        
+        try:
+            import readline
+            import re
+            with self.console.capture() as capture:
+                self.console.print(prompt_str, end="")
+            ansi_prompt = capture.get()
+            safe_prompt = re.sub(r"(\033\[[0-9;]*[a-zA-Z])", r"\001\1\002", ansi_prompt)
+            return input(safe_prompt)
+        except Exception:
+            return str(self.console.input(prompt_str))
 
     def append_history(self, text: str) -> None:
         self.history.append(text)
