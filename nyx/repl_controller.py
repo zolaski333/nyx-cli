@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Callable, Protocol, TYPE_CHECKING
 
@@ -93,6 +94,22 @@ def write_config_file(path: Path, data: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
+
+
+def persist_user_theme(theme_name: str) -> Path:
+    """Persist the UI theme as a user-wide preference."""
+    data = load_config_file(DEFAULT_USER_CONFIG_PATH)
+    data["theme"] = theme_name
+    write_config_file(DEFAULT_USER_CONFIG_PATH, data)
+    return DEFAULT_USER_CONFIG_PATH
+
+
+def should_persist_interactive_preference() -> bool:
+    """Return True when Nyx is running in a real interactive terminal."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
 
 
 def get_paginated_arg(user_input: str, command: str) -> int:
@@ -254,6 +271,11 @@ def handle_repl_command(agent: "Agent", config: Config, ui: ReplUI, user_input: 
             theme_name = rest.lower()
             if theme_name in available_themes:
                 config.theme = theme_name
+                if should_persist_interactive_preference():
+                    try:
+                        persist_user_theme(theme_name)
+                    except Exception as e:
+                        ui.show_config_error(f"Failed to save theme: {e}")
                 ui.show_theme_changed(theme_name)
             else:
                 ui.show_status(f"Unknown theme: {rest}. Available themes: {', '.join(available_themes)}", success=False)

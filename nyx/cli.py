@@ -37,6 +37,7 @@ from nyx.agent import Agent
 from nyx.memory import MemoryManager
 from nyx.repl_controller import run_interactive_repl
 from nyx.approval import run_exclusive_approval
+from nyx.terminal import clear_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +553,7 @@ class AnsiReplUI:
         self.history = REPLHistory()
 
     def setup(self, agent: Agent, config: Config) -> None:
+        clear_terminal()
         setup_readline(agent)
         agent.on_command_approval = _make_ansi_approval_handler()
         agent.on_file_approval = _make_ansi_file_approval_handler()

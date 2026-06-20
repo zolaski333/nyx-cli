@@ -32,6 +32,7 @@ except ImportError:
 from nyx.config import Config
 from nyx.agent import Agent
 from nyx.repl_controller import run_interactive_repl
+from nyx.terminal import clear_terminal
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +607,7 @@ class RichReplUI:
         setup_readline(agent)
         agent.on_command_approval = _make_rich_approval_handler(self.console)
         agent.on_file_approval = _make_rich_file_approval_handler(self.console)
+        clear_terminal()
         self.console.clear()
         self.console.print(welcome_panel(config, len(agent.tools)))
 

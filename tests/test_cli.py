@@ -666,6 +666,40 @@ class TestREPLMode:
         assert "Theme switched to: dracula" in result.stdout
 
 
+def test_theme_command_persists_user_preference(monkeypatch, tmp_path):
+    """Interactive /theme changes should persist to the user config."""
+    from nyx import repl_controller
+    from nyx.config import Config
+
+    class _UI:
+        changed: str | None = None
+        errors: list[str] = []
+
+        def show_theme_changed(self, theme: str) -> None:
+            self.changed = theme
+
+        def show_config_error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def show_status(self, message: str, *, success: bool = False) -> None:
+            pass
+
+    user_config = tmp_path / "user-config.json"
+    monkeypatch.setattr(repl_controller, "DEFAULT_USER_CONFIG_PATH", user_config)
+    monkeypatch.setattr(repl_controller, "should_persist_interactive_preference", lambda: True)
+
+    config = Config(openrouter_api_key="test-key")
+    ui = _UI()
+
+    consumed = repl_controller.handle_repl_command(object(), config, ui, "/theme dracula")
+
+    assert consumed is True
+    assert config.theme == "dracula"
+    assert ui.changed == "dracula"
+    assert ui.errors == []
+    assert json.loads(user_config.read_text(encoding="utf-8"))["theme"] == "dracula"
+
+
 # =========================================================================
 # --json flag tests
 # =========================================================================
