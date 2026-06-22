@@ -141,6 +141,20 @@ class TestAgentSandbox:
         assert "ERROR" in result
         assert "Empty command" in result
 
+    def test_execute_command_timeout_explains_termination(self):
+        """Timeouts should clearly state that the process was terminated."""
+        import sys
+
+        tc = ToolCall(
+            id="1",
+            name="execute_command",
+            arguments={"command": f'"{sys.executable}" -c "import time; time.sleep(2)"', "timeout": 1},
+        )
+        result = self.agent._execute_tool(tc)
+        assert "timed out" in result.lower()
+        assert "terminated" in result.lower()
+        assert "start_process" in result
+
     def test_unknown_command_now_allowed(self):
         """Unknown commands should now be allowed by default (no more whitelist)."""
         tc = ToolCall(id="2", name="execute_command", arguments={"command": "which python3"})
@@ -347,6 +361,23 @@ class TestAgentBuiltinTools:
             result = self.agent._execute_tool(tc_read)
             assert "hello world" in result
 
+    def test_write_file_dry_run_does_not_write(self):
+        """write_file dry_run should return a diff preview without touching disk."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "preview.txt"
+            tc_write = ToolCall(
+                id="1",
+                name="write_file",
+                arguments={"path": str(filepath), "content": "hello world", "dry_run": True},
+            )
+            result = self.agent._execute_tool(tc_write)
+            assert "[DRY-RUN]" in result
+            assert "Preview diff" in result
+            assert not filepath.exists()
+
     def test_append_file(self):
         """Append to a file via the PatchTool (with approval callback)."""
         import tempfile
@@ -401,6 +432,62 @@ class TestAgentBuiltinTools:
             # Verify
             content = open(filepath).read()
             assert "modified content" in content
+
+    def test_apply_diff_conflict_does_not_fallback_by_default(self):
+        """A conflicting patch must not silently become a full-file write."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "conflict.txt"
+            filepath.write_text("actual\n", encoding="utf-8")
+            self.agent.on_file_approval = lambda path, summary, diff: (True, "")
+            tc = ToolCall(
+                id="1",
+                name="apply_diff",
+                arguments={
+                    "path": str(filepath),
+                    "diff": "--- a/conflict.txt\n+++ b/conflict.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+                },
+            )
+            result = self.agent._execute_tool(tc)
+            assert "[CONFLICT]" in result
+            assert "[NO FALLBACK]" in result
+            assert filepath.read_text(encoding="utf-8") == "actual\n"
+
+    def test_start_process_read_write_stop(self):
+        """Long-running process tools should support stdin and buffered output."""
+        import sys
+        import time
+
+        command = (
+            f'"{sys.executable}" -u -c '
+            '"import sys; print(\'ready\', flush=True); '
+            'line=sys.stdin.readline(); print(\'echo:\'+line.strip(), flush=True)"'
+        )
+        start = self.agent._execute_tool(ToolCall(id="1", name="start_process", arguments={"command": command}))
+        assert "Started process" in start
+        process_id = start.split("Started process ", 1)[1].split(" ", 1)[0]
+
+        time.sleep(0.2)
+        first = self.agent._execute_tool(
+            ToolCall(id="2", name="read_process_output", arguments={"process_id": process_id})
+        )
+        assert "ready" in first
+
+        write = self.agent._execute_tool(
+            ToolCall(id="3", name="write_process_input", arguments={"process_id": process_id, "text": "hi\n"})
+        )
+        assert "Wrote" in write
+
+        time.sleep(0.2)
+        second = self.agent._execute_tool(
+            ToolCall(id="4", name="read_process_output", arguments={"process_id": process_id})
+        )
+        assert "echo:hi" in second
+
+        stop = self.agent._execute_tool(ToolCall(id="5", name="stop_process", arguments={"process_id": process_id}))
+        assert "Stopped process" in stop or "already exited" in stop
 
     def test_write_file_denied(self):
         """A write_file should be denied if the approval callback rejects it."""

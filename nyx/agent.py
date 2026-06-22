@@ -734,6 +734,12 @@ class Agent:
                 details.append(f"{len(str(arguments.get('diff', '')).splitlines())} lines diff")
             elif name == "execute_command" and result.strip() and result != "(no output)":
                 details.append(f"{len(result.splitlines())} lines output")
+            elif name == "start_process":
+                details.append("process started")
+            elif name == "read_process_output":
+                details.append(f"{len(result.splitlines())} lines process output")
+            elif name in {"write_process_input", "stop_process"}:
+                details.append("process updated")
             elif name == "subagent_run":
                 m = re.search(r"completed in (\d+) step", result)
                 if m:

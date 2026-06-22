@@ -14,6 +14,7 @@ from nyx.providers.base import ToolCall, ToolDefinition
 from nyx.web_search import search_web, format_search_results, fetch_page
 from nyx.sandbox import PathTraversalError, SandboxDenyPathError
 from nyx.permissions import PermissionLevel
+from nyx.process_manager import PROCESS_MANAGER
 from nyx.repo_map import build_repo_map, build_repo_map_short
 from nyx.search_code import search_code as _search_code
 from nyx.test_loop import run_tests as _run_tests
@@ -171,9 +172,55 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "The shell command to run"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 30)", "default": 30},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 30). On timeout Nyx terminates the process and it cannot be resumed; use start_process for long-running commands.", "default": 30},
             },
             "required": ["command"],
+        },
+    ),
+    ToolDefinition(
+        name="start_process",
+        description="Start a long-running shell process and return a process_id. Use this for dev servers, watchers, and simple REPLs when you need to read output later.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The command to start"},
+            },
+            "required": ["command"],
+        },
+    ),
+    ToolDefinition(
+        name="read_process_output",
+        description="Read buffered stdout/stderr from a process started with start_process. This does not block waiting for new output.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "process_id": {"type": "string", "description": "Process id returned by start_process"},
+                "max_lines": {"type": "integer", "description": "Maximum buffered lines to return", "default": 200},
+            },
+            "required": ["process_id"],
+        },
+    ),
+    ToolDefinition(
+        name="write_process_input",
+        description="Send text to stdin of a process started with start_process. Include a trailing newline when submitting REPL commands.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "process_id": {"type": "string", "description": "Process id returned by start_process"},
+                "text": {"type": "string", "description": "Text to write to stdin"},
+            },
+            "required": ["process_id", "text"],
+        },
+    ),
+    ToolDefinition(
+        name="stop_process",
+        description="Stop a process started with start_process. On Windows this terminates the process tree with taskkill.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "process_id": {"type": "string", "description": "Process id returned by start_process"},
+            },
+            "required": ["process_id"],
         },
     ),
     ToolDefinition(
@@ -191,12 +238,13 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="write_file",
-        description="Write content to a file on the filesystem. Uses a diff/patch workflow with user approval for changes outside the project sandbox.",
+        description="Write content to a file on the filesystem. Uses a diff/patch workflow. Set dry_run=true to preview the diff without writing.",
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path to the file"},
                 "content": {"type": "string", "description": "The content to write"},
+                "dry_run": {"type": "boolean", "description": "If true, show the diff preview without applying changes", "default": False},
             },
             "required": ["path", "content"],
         },
@@ -227,13 +275,15 @@ BUILTIN_TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="apply_diff",
-        description="Apply a unified diff or SEARCH/REPLACE patch to a file. Supports standard unified diff format and SEARCH/REPLACE blocks. Validates syntax, detects conflicts, categorizes changes (CREATE/MODIFY/DELETE), and shows a clear summary before requiring user approval. Preferred over write_file for modifying existing files.",
+        description="Apply a unified diff or SEARCH/REPLACE patch to a file. Supports dry-run previews. Conflict fallback to full-file write is disabled unless allow_write_fallback=true.",
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path to the file to modify"},
                 "diff": {"type": "string", "description": "The unified diff or SEARCH/REPLACE block to apply. For unified diff, use standard format with @@ hunk headers. For SEARCH/REPLACE, use \\<<<<<<< SEARCH / ======= / \\>>>>>>> REPLACE blocks."},
                 "description": {"type": "string", "description": "Brief description of what this change does"},
+                "dry_run": {"type": "boolean", "description": "If true, show the resulting diff preview without applying changes", "default": False},
+                "allow_write_fallback": {"type": "boolean", "description": "If true, an apply_diff conflict may explicitly fall back to a full-file write. Defaults to false.", "default": False},
             },
             "required": ["path", "diff"],
         },
@@ -988,10 +1038,57 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                 return trunc_out or "(no output)"
             except subprocess.TimeoutExpired:
                 logger.warning("Command timed out (%ds): %s", timeout, command)
-                return f"Command timed out after {timeout}s."
+                return (
+                    f"Command timed out after {timeout}s. The subprocess was terminated by Nyx and "
+                    "cannot be resumed. Use start_process for long-running commands."
+                )
             except Exception as e:
                 logger.error("Command error: %s", e)
                 return f"Command error: {e}"
+
+        # -- Long-running process execution --
+        if name == "start_process":
+            command = args.get("command", "").strip()
+            if not command:
+                return "[ERROR] Empty command received. Provide a command to start."
+            approved, reason, perm_level = authorize_command(command, context)
+            context.audit.log_permission_check("shell", command, perm_level.value, approved, reason)
+            if not approved:
+                return f"[SECURITY] Process start denied: '{command[:200]}'\nReason: {reason}"
+            env = os.environ.copy()
+            cwd = context.sandbox.root_str if context.sandbox.root else "."
+            try:
+                managed = PROCESS_MANAGER.start(command, cwd=cwd, env=env)
+                return (
+                    f"Started process {managed.process_id} (pid {managed.process.pid}).\n"
+                    f"Command: {command}\n"
+                    "Use read_process_output with this process_id to inspect output, "
+                    "write_process_input to send stdin, and stop_process to terminate it."
+                )
+            except Exception as e:
+                return f"Process start error: {e}"
+
+        if name == "read_process_output":
+            process_id = str(args.get("process_id", "")).strip()
+            max_lines = int(args.get("max_lines", 200) or 200)
+            process_info, output_lines = PROCESS_MANAGER.read(process_id, max_lines=max_lines)
+            if not process_info:
+                return f"Unknown process_id: {process_id}"
+            status = process_info.process.poll()
+            status_text = "running" if status is None else f"exited with code {status}"
+            output = "\n".join(f"[{stream}] {line}" for stream, line in output_lines)
+            return f"Process {process_id} is {status_text}.\n" + (output or "(no new output)")
+
+        if name == "write_process_input":
+            process_id = str(args.get("process_id", "")).strip()
+            text = str(args.get("text", ""))
+            ok, message = PROCESS_MANAGER.write(process_id, text)
+            return message if ok else f"Process input error: {message}"
+
+        if name == "stop_process":
+            process_id = str(args.get("process_id", "")).strip()
+            ok, message = PROCESS_MANAGER.stop(process_id)
+            return message if ok else f"Process stop error: {message}"
 
         # -- File read (with sandbox path resolution) --
         if name == "read_file":
@@ -1040,6 +1137,7 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
         if name == "write_file":
             raw_path = args.get("path", "")
             content = args.get("content", "")
+            dry_run = _parse_bool(args.get("dry_run"), False)
             try:
                 resolved = context.sandbox.resolve(raw_path, for_write=True)
             except (PathTraversalError, SandboxDenyPathError) as e:
@@ -1047,9 +1145,9 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
             except Exception as e:
                 return f"Error resolving path: {e}"
 
-            success, message = context.patch_tool.propose_write(str(resolved), content)
+            success, message = context.patch_tool.propose_write(str(resolved), content, dry_run=dry_run)
             context.audit.log_file_operation(
-                "write", str(resolved), len(content), success=success,
+                "write_dry_run" if dry_run else "write", str(resolved), len(content), success=success,
                 error="" if success else message,
             )
             return str(message)
@@ -1058,6 +1156,8 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
         if name == "apply_diff":
             raw_path = args.get("path", "")
             diff_text = args.get("diff", "")
+            dry_run = _parse_bool(args.get("dry_run"), False)
+            allow_write_fallback = _parse_bool(args.get("allow_write_fallback"), False)
 
             try:
                 resolved = context.sandbox.resolve(raw_path, for_write=True)
@@ -1077,14 +1177,20 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                     f"This path is blocked under all circumstances."
                 )
 
-            success, message = context.patch_tool.propose_patch(str(resolved), diff_text)
+            success, message = context.patch_tool.propose_patch(str(resolved), diff_text, dry_run=dry_run)
             context.audit.log_file_operation(
-                "apply_diff", str(resolved), len(diff_text), success=success,
+                "apply_diff_dry_run" if dry_run else "apply_diff", str(resolved), len(diff_text), success=success,
                 error="" if success else message,
             )
 
-            # Auto-fallback: if a conflict is detected, try write_file with reconstructed content
+            # Explicit fallback: a patch conflict must not silently become a full-file rewrite.
             if not success and message.startswith("[CONFLICT]"):
+                if not allow_write_fallback:
+                    return (
+                        str(message)
+                        + "\n\n[NO FALLBACK] apply_diff did not rewrite the whole file. "
+                        + "Set allow_write_fallback=true only when a full-file write is intentional."
+                    )
                 from nyx.diff_tool import _apply_unified_diff_to_content, _apply_search_replace_to_content, _SEARCH_MARKER_RE
                 original_content = ""
                 if resolved.exists():
@@ -1100,13 +1206,18 @@ def execute_tool(tc: ToolCall, context: ToolContext) -> str:
                     proposed_content = _apply_unified_diff_to_content(original_content, diff_text)
 
                 if proposed_content is not None:
-                    logger.info("apply_diff conflict: falling back to write_file for %s", resolved)
-                    fb_success, fb_message = context.patch_tool.propose_write(str(resolved), proposed_content)
+                    logger.warning("apply_diff conflict: explicit write_file fallback for %s", resolved)
+                    fb_success, fb_message = context.patch_tool.propose_write(
+                        str(resolved), proposed_content, dry_run=dry_run
+                    )
                     context.audit.log_file_operation(
                         "write_file_fallback", str(resolved), len(proposed_content),
                         success=fb_success, error="" if fb_success else fb_message,
                     )
-                    fallback_note = "[auto-fallback from apply_diff] " if fb_success else "[fallback also failed] "
+                    fallback_note = (
+                        "[EXPLICIT FALLBACK FROM apply_diff TO write_file] "
+                        if fb_success else "[EXPLICIT FALLBACK ALSO FAILED] "
+                    )
                     return fallback_note + str(fb_message)
                 return str(message)
 

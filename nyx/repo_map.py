@@ -10,12 +10,13 @@ Provides a structured overview of the current repository:
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -317,6 +318,106 @@ def _get_project_language(root: Path) -> str:
     return best_lang
 
 
+def _load_pyproject(root: Path) -> dict[str, Any]:
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return {}
+    try:
+        import tomllib
+
+        return cast(dict[str, Any], tomllib.loads(pyproject.read_text(encoding="utf-8", errors="ignore")))
+    except Exception:
+        return {}
+
+
+def _load_package_json(root: Path) -> dict[str, Any]:
+    pkg_json = root / "package.json"
+    if not pkg_json.exists():
+        return {}
+    try:
+        data = json.loads(pkg_json.read_text(encoding="utf-8", errors="ignore"))
+        return dict(data) if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _get_project_metadata(root: Path) -> dict[str, Any]:
+    """Collect package/framework/runtime metadata without executing project code."""
+    metadata: dict[str, Any] = {
+        "name": root.name,
+        "version": "",
+        "runtime": "",
+        "frameworks": [],
+        "dependencies": [],
+        "dev_dependencies": [],
+        "managers": [],
+    }
+
+    pyproject = _load_pyproject(root)
+    if pyproject:
+        project = pyproject.get("project", {})
+        if isinstance(project, dict):
+            metadata["name"] = project.get("name") or metadata["name"]
+            metadata["version"] = project.get("version") or ""
+            metadata["runtime"] = project.get("requires-python") or ""
+            deps = project.get("dependencies") or []
+            if isinstance(deps, list):
+                metadata["dependencies"].extend(str(dep) for dep in deps[:20])
+            optional = project.get("optional-dependencies") or {}
+            if isinstance(optional, dict):
+                for group, deps_group in optional.items():
+                    if isinstance(deps_group, list):
+                        metadata["dev_dependencies"].extend(f"{group}: {dep}" for dep in deps_group[:10])
+        tool = pyproject.get("tool", {})
+        if isinstance(tool, dict):
+            for framework in ("pytest", "ruff", "mypy", "coverage"):
+                if framework in tool:
+                    metadata["frameworks"].append(framework)
+        metadata["managers"].append("pyproject.toml")
+
+    requirements = root / "requirements.txt"
+    if requirements.exists():
+        try:
+            reqs = [
+                line.strip()
+                for line in requirements.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            metadata["dependencies"].extend(reqs[:20])
+            metadata["managers"].append("requirements.txt")
+        except OSError:
+            pass
+
+    package_json = _load_package_json(root)
+    if package_json:
+        metadata["name"] = package_json.get("name") or metadata["name"]
+        metadata["version"] = package_json.get("version") or metadata["version"]
+        deps = package_json.get("dependencies") or {}
+        dev_deps = package_json.get("devDependencies") or {}
+        if isinstance(deps, dict):
+            metadata["dependencies"].extend(f"{name}@{version}" for name, version in list(deps.items())[:20])
+        if isinstance(dev_deps, dict):
+            metadata["dev_dependencies"].extend(f"{name}@{version}" for name, version in list(dev_deps.items())[:20])
+        dep_names = set(deps) | set(dev_deps) if isinstance(deps, dict) and isinstance(dev_deps, dict) else set()
+        for framework in ("next", "react", "vue", "svelte", "vite", "typescript", "jest", "vitest"):
+            if framework in dep_names:
+                metadata["frameworks"].append(framework)
+        metadata["managers"].append("package.json")
+
+    if (root / "poetry.lock").exists():
+        metadata["managers"].append("poetry.lock")
+    if (root / "package-lock.json").exists():
+        metadata["managers"].append("package-lock.json")
+    if (root / "pnpm-lock.yaml").exists():
+        metadata["managers"].append("pnpm-lock.yaml")
+
+    metadata["frameworks"] = sorted(set(metadata["frameworks"]))
+    metadata["dependencies"] = list(dict.fromkeys(metadata["dependencies"]))[:25]
+    metadata["dev_dependencies"] = list(dict.fromkeys(metadata["dev_dependencies"]))[:25]
+    metadata["managers"] = list(dict.fromkeys(metadata["managers"]))
+    return metadata
+
+
 def _format_func(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Format a function or method signature including async, decorators, and arguments."""
     is_async = isinstance(node, ast.AsyncFunctionDef)
@@ -585,6 +686,26 @@ def build_repo_map(root: str | Path | None = None, write_index: bool = False) ->
     lang = _get_project_language(root)
     parts.append(f"\n🔤 Language: {lang}")
     parts.append(f"📍 Path: {root}")
+
+    project_meta = _get_project_metadata(root)
+    parts.append("\nProject Metadata:")
+    parts.append(f"  Name: {project_meta['name']}")
+    if project_meta["version"]:
+        parts.append(f"  Version: {project_meta['version']}")
+    if project_meta["runtime"]:
+        parts.append(f"  Runtime: {project_meta['runtime']}")
+    if project_meta["managers"]:
+        parts.append(f"  Config/lock files: {', '.join(project_meta['managers'])}")
+    if project_meta["frameworks"]:
+        parts.append(f"  Frameworks/tools: {', '.join(project_meta['frameworks'])}")
+    if project_meta["dependencies"]:
+        deps = ", ".join(project_meta["dependencies"][:10])
+        suffix = f" (+{len(project_meta['dependencies']) - 10} more)" if len(project_meta["dependencies"]) > 10 else ""
+        parts.append(f"  Dependencies: {deps}{suffix}")
+    if project_meta["dev_dependencies"]:
+        dev_deps = ", ".join(project_meta["dev_dependencies"][:10])
+        suffix = f" (+{len(project_meta['dev_dependencies']) - 10} more)" if len(project_meta["dev_dependencies"]) > 10 else ""
+        parts.append(f"  Dev dependencies: {dev_deps}{suffix}")
 
     # -- Directory tree --
     parts.append("\n📂 Directory Structure:")

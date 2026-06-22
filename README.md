@@ -410,12 +410,16 @@ Conversations are saved to disk with persistent memory and basic summarisation s
 | `parallel_subagents` | Run multiple subagents in parallel |
 | `memory_save` | Save notes to persistent memory |
 | `memory_recall` | Search past conversations |
-| `execute_command` | Run shell commands with permission checks |
+| `execute_command` | Run bounded shell commands with permission checks and explicit timeout termination |
+| `start_process` | Start a long-running process such as a dev server or simple REPL |
+| `read_process_output` | Read buffered stdout/stderr from a started process |
+| `write_process_input` | Send stdin to a started process |
+| `stop_process` | Stop a started process |
 | `read_file` | Read files inside the sandbox/allowlist |
-| `write_file` | Write/create files through the patch workflow |
+| `write_file` | Write/create files through the patch workflow; supports `dry_run` previews |
 | `append_file` | Append to existing files |
 | `list_files` | List directory contents |
-| `apply_diff` | Apply unified diff or SEARCH/REPLACE patches |
+| `apply_diff` | Apply unified diff or SEARCH/REPLACE patches; supports `dry_run`; full-file fallback requires `allow_write_fallback` |
 | `rollback_file` | Roll back the most recent file change |
 | `patch_history` | Show recent patch history |
 | `repo_map` | Summarise repository structure, Git status and tests |

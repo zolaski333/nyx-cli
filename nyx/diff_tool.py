@@ -988,7 +988,7 @@ class PatchTool:
     # Public API
     # ------------------------------------------------------------------
 
-    def propose_write(self, path: str, content: str) -> tuple[bool, str]:
+    def propose_write(self, path: str, content: str, *, dry_run: bool = False) -> tuple[bool, str]:
         """Propose a file write via diff/patch with user approval.
 
         This is the main entry point. It:
@@ -1043,6 +1043,17 @@ class PatchTool:
         # Build summary
         summary = patch_info.summary
         detailed = patch_info.detailed_summary + git_status
+
+        preview = format_diff_for_display(diff, max_lines=240)
+        if dry_run:
+            return (
+                True,
+                "[DRY-RUN] No file changes were applied.\n"
+                + detailed
+                + "\n\nPreview diff:\n```diff\n"
+                + preview
+                + "\n```",
+            )
 
         # Request approval
         if self._approval_callback:
@@ -1142,6 +1153,8 @@ class PatchTool:
         path: str,
         diff_text: str,
         patch_format: str = "auto",
+        *,
+        dry_run: bool = False,
     ) -> tuple[bool, str]:
         """Propose applying a raw patch/diff to a file.
 
@@ -1246,6 +1259,18 @@ class PatchTool:
         # Build summary
         summary = patch_info.summary
         detailed = patch_info.detailed_summary + git_status
+
+        preview_diff = compute_diff(original, proposed, str(path))
+        preview = format_diff_for_display(preview_diff, max_lines=240)
+        if dry_run:
+            return (
+                True,
+                "[DRY-RUN] No file changes were applied.\n"
+                + detailed
+                + "\n\nPreview diff:\n```diff\n"
+                + preview
+                + "\n```",
+            )
 
         # Request approval
         if self._approval_callback:
