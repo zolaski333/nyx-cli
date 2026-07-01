@@ -13,6 +13,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import importlib.util
 import json
 import logging
@@ -693,11 +695,13 @@ def run_ansi_single(agent: Agent, prompt: str) -> None:
 
 
 def _run_json(agent: Agent, prompt: str) -> None:
-    """Run in JSON mode â€” output structured JSON for CI/CD pipelines."""
+    """Run in JSON mode and keep stdout as one strict JSON object."""
     start = time.time()
+    leaked_stdout = io.StringIO()
 
     try:
-        result = agent.run(prompt, on_token=None)
+        with contextlib.redirect_stdout(leaked_stdout):
+            result = agent.run(prompt, on_token=None)
         output = {
             "status": "success",
             "prompt": prompt,
@@ -709,15 +713,24 @@ def _run_json(agent: Agent, prompt: str) -> None:
             "tool_calls": agent.json_logger.total_tool_calls if agent.json_logger else 0,
         }
     except Exception as e:
+        leaked = leaked_stdout.getvalue()
+        if leaked:
+            print(leaked, file=sys.stderr, end="")
         output = {
             "status": "error",
             "prompt": prompt,
             "error": str(e),
             "duration_seconds": round(time.time() - start, 2),
         }
+    else:
+        leaked = leaked_stdout.getvalue()
+        if leaked:
+            print(leaked, file=sys.stderr, end="")
 
-    print(json.dumps(output, ensure_ascii=False, indent=2))
-    agent.shutdown()
+    try:
+        print(json.dumps(output, ensure_ascii=False, indent=2, allow_nan=False))
+    finally:
+        agent.shutdown()
 
 
 # ---------------------------------------------------------------------------
