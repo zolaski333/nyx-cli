@@ -42,10 +42,10 @@ Experimental areas:
 
 ## 🚀 Quick Start
 
-### 1. Prérequis
+### 1. Prerequisites
 
-- **Python 3.10+** ([télécharger](https://www.python.org/downloads/))
-- Une clé API chez [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys) ou [Anthropic](https://console.anthropic.com/)
+- **Python 3.10+** ([download](https://www.python.org/downloads/))
+- An API key from [OpenRouter](https://openrouter.ai/keys), [OpenAI](https://platform.openai.com/api-keys), or [Anthropic](https://console.anthropic.com/)
 
 ### 2. Installation
 
@@ -53,27 +53,27 @@ Experimental areas:
 <summary><b>🐧 Linux / macOS</b></summary>
 
 ```bash
-# Cloner le projet
+# Clone the repository
 git clone https://github.com/zolaski333/nyx-cli.git
 cd nyx-cli
 
-# Configurer ta clé API
+# Configure your API key
 export OPENROUTER_API_KEY="sk-or-..."
-# ou : export OPENAI_API_KEY="sk-..."
-# ou : export ANTHROPIC_API_KEY="sk-ant-..."
+# or: export OPENAI_API_KEY="sk-..."
+# or: export ANTHROPIC_API_KEY="sk-ant-..."
 
-# Installation globale (recommandée)
+# Install globally (recommended)
 pip install -e ".[tui]"
 
-# Ou depuis Git, sans cloner durablement le dépôt
+# Or install directly from Git without keeping a local clone
 pipx install "nyx-cli[tui] @ git+https://github.com/zolaski333/nyx-cli.git"
 
-# Lancer depuis n'importe quel dossier
-cd /chemin/vers/mon/projet
+# Run Nyx from any directory
+cd /path/to/my/project
 nyx
 ```
 
-> **Note** : Si tu es sur Ubuntu/Debian et que `pip` bloque avec `externally-managed-environment`, utilise `pipx` :
+> **Note:** If `pip` reports an `externally-managed-environment` error on Ubuntu or Debian, use `pipx`:
 > ```bash
 > pipx install ".[tui]"
 > nyx
@@ -84,32 +84,32 @@ nyx
 <summary><b>🪟 Windows</b></summary>
 
 ```powershell
-# Cloner le projet
+# Clone the repository
 git clone https://github.com/zolaski333/nyx-cli.git
 cd nyx-cli
 
-# Configurer ta clé API
+# Configure your API key
 $env:OPENROUTER_API_KEY = "sk-or-..."
-# ou : $env:OPENAI_API_KEY = "sk-..."
-# ou : $env:ANTHROPIC_API_KEY = "sk-ant-..."
+# or: $env:OPENAI_API_KEY = "sk-..."
+# or: $env:ANTHROPIC_API_KEY = "sk-ant-..."
 
-# Installation globale (recommandée)
+# Install globally (recommended)
 pip install -e ".[tui]"
 
-# Ou depuis Git, sans cloner durablement le dépôt
+# Or install directly from Git without keeping a local clone
 pipx install "nyx-cli[tui] @ git+https://github.com/zolaski333/nyx-cli.git"
 
-# Lancer depuis n'importe quel dossier
-cd C:\chemin\vers\mon\projet
+# Run Nyx from any directory
+cd C:\path\to\my\project
 nyx
 ```
 </details>
 
 <details>
-<summary><b>🐳 Docker / sans installation</b></summary>
+<summary><b>🐳 Docker / no installation</b></summary>
 
 ```bash
-# Sans installation — depuis le dossier du projet
+# Run without installation from the repository directory
 python -m nyx.cli
 ```
 </details>
@@ -121,16 +121,16 @@ python -m nyx.cli
 ### Interactive REPL
 
 ```bash
-# Va dans le dossier où tu veux travailler
-cd /chemin/vers/mon/projet
+# Go to the directory you want to work in
+cd /path/to/my/project
 
-# Lance Nyx — il détecte automatiquement le répertoire courant
+# Start Nyx; it automatically detects the current directory
 nyx
 ```
 
-> **⚡ Confort de saisie (REPL)** :
-> - **Autocomplétion (Tab)** : Appuie sur `Tab` pour compléter automatiquement les commandes commençant par `/` (comme `/help`, `/model`, `/tools`) ainsi que les chemins de fichiers et dossiers.
-> - **Historique des commandes** : Utilise les flèches `↑` et `↓` pour naviguer dans l'historique de tes commandes passées. L'historique est sauvegardé automatiquement entre les sessions dans le fichier `~/.nyx_history` (jusqu'à 1000 entrées).
+> **⚡ REPL input shortcuts:**
+> - **Tab completion:** Press `Tab` to complete slash commands such as `/help`, `/model`, and `/tools`, as well as file and directory paths.
+> - **Command history:** Use the up and down arrow keys to browse previous commands. History is saved automatically between sessions in `~/.nyx_history` (up to 1,000 entries).
 
 ### Single prompt
 
@@ -169,13 +169,13 @@ nyx --provider anthropic
 ### Working directory
 
 ```bash
-# Par défaut, Nyx utilise le répertoire courant
-cd /mon/projet
+# Nyx uses the current directory by default
+cd /my/project
 nyx
 
-# Tu peux aussi spécifier un répertoire différent
-nyx --dir /autre/chemin
-nyx --project /autre/chemin
+# You can also specify a different directory
+nyx --dir /another/path
+nyx --project /another/path
 ```
 
 ### Pipe mode (stdin)
